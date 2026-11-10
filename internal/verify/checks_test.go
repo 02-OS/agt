@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -130,7 +131,17 @@ func TestFixtureTreesStayByteForByte(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if sha256Hex(body) != want {
+		sum := sha256Hex(body)
+		if sum != want && runtime.GOOS == "windows" {
+			// Git for Windows can check a LF blob out as CRLF. The locked
+			// digest is the committed byte string. Any other edit still fails.
+			lf := bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n"))
+			if sha256Hex(lf) == want {
+				body = lf
+				sum = want
+			}
+		}
+		if sum != want {
 			t.Fatalf("%s hash changed", rel)
 		}
 		same, err := PropertyCheck("sha256_equal", body, body)
