@@ -3,6 +3,7 @@ package tools
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -81,7 +82,7 @@ func TestPatchPreservesExecutableBit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm()&0o111 == 0 {
+	if runtime.GOOS != "windows" && st.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("mode %o", st.Mode().Perm())
 	}
 }
@@ -98,7 +99,7 @@ func TestSearchFindsLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "payments/processor.py:1:") {
+	if !strings.Contains(filepath.ToSlash(out), "payments/processor.py:1:") {
 		t.Fatalf("search = %q", out)
 	}
 }

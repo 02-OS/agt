@@ -26,10 +26,18 @@ func protectPath(path string) error {
 	if err != nil {
 		return fmt.Errorf("current user: %w", err)
 	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	var inheritance uint32 = windows.NO_INHERITANCE
+	if info.IsDir() {
+		inheritance = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+	}
 	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
 		AccessPermissions: windows.GENERIC_ALL,
 		AccessMode:        windows.GRANT_ACCESS,
-		Inheritance:       windows.NO_INHERITANCE,
+		Inheritance:       inheritance,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
 			TrusteeType:  windows.TRUSTEE_IS_USER,
@@ -37,6 +45,7 @@ func protectPath(path string) error {
 		},
 	}}, nil)
 	if err != nil {
+		runtime.KeepAlive(sid)
 		return fmt.Errorf("build token ACL: %w", err)
 	}
 	err = windows.SetNamedSecurityInfo(
@@ -48,6 +57,8 @@ func protectPath(path string) error {
 		acl,
 		nil,
 	)
+	runtime.KeepAlive(sid)
+	runtime.KeepAlive(acl)
 	if err != nil {
 		return fmt.Errorf("restrict %s to the current user: %w", path, err)
 	}

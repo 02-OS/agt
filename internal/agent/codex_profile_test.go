@@ -28,8 +28,8 @@ func TestProfileArgsGrantOnlyTheSnapshotAndRuntime(t *testing.T) {
 		`default_permissions="agt-snapshot"`,
 		"network.enabled=false",
 		"mcp_servers.node_repl.enabled=false",
-		work,
-		runtime,
+		filepath.ToSlash(work),
+		filepath.ToSlash(runtime),
 		`":minimal"="read"`,
 	} {
 		if !strings.Contains(text, want) {

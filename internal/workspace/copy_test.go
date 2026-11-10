@@ -3,6 +3,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -163,7 +164,7 @@ func TestMaterializeCopiesDotfilesAndExecutableBits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st.Mode().Perm()&0o111 == 0 {
+		if runtime.GOOS != "windows" && st.Mode().Perm()&0o111 == 0 {
 			t.Fatalf("executable bit cleared in %s: %o", root, st.Mode().Perm())
 		}
 	}

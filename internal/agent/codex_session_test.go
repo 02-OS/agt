@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -284,7 +285,11 @@ func TestAskExecutableBasenameIsNotLive(t *testing.T) {
 	t.Setenv("AGT_STUB_MODE", "stream")
 	t.Setenv("AGT_STUB_LOG", logPath)
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "codex")
+	name := "codex"
+	if runtime.GOOS == "windows" {
+		name = "codex.exe"
+	}
+	bin := filepath.Join(dir, name)
 	if err := copyFile(bin, os.Args[0]); err != nil {
 		t.Fatal(err)
 	}
