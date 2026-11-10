@@ -66,9 +66,18 @@ func TestCodexRuntimeRootFindsTheVendorPrefix(t *testing.T) {
 	}
 	got := codexRuntimeRoot(link)
 	want := filepath.Join(root, "lib", "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-linux-x64", "vendor", "x86_64-unknown-linux-musl")
-	if got != want {
-		t.Fatalf("root %s", got)
+	if !sameResolvedPath(got, want) {
+		t.Fatalf("root %s want %s", got, want)
 	}
+}
+
+func sameResolvedPath(got, want string) bool {
+	if got == want {
+		return true
+	}
+	left, err1 := filepath.EvalSymlinks(got)
+	right, err2 := filepath.EvalSymlinks(want)
+	return err1 == nil && err2 == nil && left == right
 }
 
 func TestCodexRuntimeRootResolvesBareName(t *testing.T) {
