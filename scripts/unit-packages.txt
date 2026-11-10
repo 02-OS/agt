@@ -5,11 +5,13 @@
 ./cmd/agt
 ./cmd/agtd
 ./internal/agent
+./internal/audit
 ./internal/auth
 ./internal/cli
 ./internal/client
 ./internal/config
 ./internal/diag
+./internal/evidence
 ./internal/model
 ./internal/patch
 ./internal/policy
