@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -48,7 +49,11 @@ func TestBuildKeepsExactBytesModesAndDeletes(t *testing.T) {
 	if ops["gone.txt"].Op != OpDelete || ops["gone.txt"].ContentBase64 != "" || ops["gone.txt"].AfterSHA256 != "" {
 		t.Fatalf("delete %#v", ops["gone.txt"])
 	}
-	if ops["script.sh"].Op != OpAdd || ops["script.sh"].AfterMode != "0755" {
+	wantScript := "0755"
+	if runtime.GOOS == "windows" {
+		wantScript = "0666"
+	}
+	if ops["script.sh"].Op != OpAdd || ops["script.sh"].AfterMode != wantScript {
 		t.Fatalf("script %#v", ops["script.sh"])
 	}
 	if !bytes.Equal(mustDecode(t, ops["bin.dat"].ContentBase64), []byte{'a', 0, 'b'}) {
@@ -204,6 +209,9 @@ func TestApplyRollsBackAPartialWrite(t *testing.T) {
 }
 
 func TestApplyKeepsModeOnlyChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not store a distinct executable bit")
+	}
 	base, work, repo := t.TempDir(), t.TempDir(), t.TempDir()
 	body := []byte("#!/bin/sh\n")
 	mustWrite(t, filepath.Join(base, "script.sh"), body, 0o644)

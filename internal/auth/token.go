@@ -19,13 +19,19 @@ func LoadOrCreate(dataDir string) (string, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return "", fmt.Errorf("data dir: %w", err)
 	}
-	if err := protectDir(dataDir); err != nil {
-		return "", err
-	}
 	path := filepath.Join(dataDir, fileName)
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("refusing to use a symlinked auth.token")
 	} else if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	// Read before the directory ACL is tightened. On Windows that ACL can
+	// replace inherited entries on a file that already exists.
+	existing, readErr := os.ReadFile(path)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return "", readErr
+	}
+	if err := protectDir(dataDir); err != nil {
 		return "", err
 	}
 	if env := strings.TrimSpace(os.Getenv("AGT_TOKEN")); env != "" {
@@ -37,8 +43,7 @@ func LoadOrCreate(dataDir string) (string, error) {
 		}
 		return env, nil
 	}
-	existing, err := os.ReadFile(path)
-	if err == nil {
+	if readErr == nil {
 		token := strings.TrimSpace(string(existing))
 		private, perr := filePrivate(path)
 		if perr != nil {
@@ -50,8 +55,6 @@ func LoadOrCreate(dataDir string) (string, error) {
 			}
 			return token, nil
 		}
-	} else if !os.IsNotExist(err) {
-		return "", err
 	}
 	token, err := newToken()
 	if err != nil {
