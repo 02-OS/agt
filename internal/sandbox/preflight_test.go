@@ -24,6 +24,15 @@ func TestPreflightReportsMissingImage(t *testing.T) {
 		}
 		return
 	}
+	// A Windows runner can have the docker client on PATH while the engine
+	// pipe is down. That refusal is the preflight result. It does not inspect
+	// an image and it does not run on the host.
+	if strings.Contains(msg, "daemon is not reachable") {
+		if strings.Contains(msg, "host python") {
+			t.Fatal(msg)
+		}
+		return
+	}
 	if !strings.Contains(msg, "agt-sandbox:does-not-exist") || !strings.Contains(msg, "make image") {
 		t.Fatal(msg)
 	}
