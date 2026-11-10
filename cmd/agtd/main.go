@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/csy20/agt/internal/diag"
 	"github.com/csy20/agt/internal/model"
 	"github.com/csy20/agt/internal/orch"
+	"github.com/csy20/agt/internal/policy"
 	"github.com/csy20/agt/internal/profile"
 	runstate "github.com/csy20/agt/internal/run"
 	"github.com/csy20/agt/internal/sandbox"
@@ -39,6 +41,15 @@ func run() int {
 	if err := config.ValidateListenAddr(cfg.ListenAddr); err != nil {
 		slog.Error(err.Error())
 		return 1
+	}
+	var pol *policy.File
+	if path := strings.TrimSpace(os.Getenv("AGT_POLICY_FILE")); path != "" {
+		loaded, err := policy.LoadFile(path)
+		if err != nil {
+			slog.Error("policy file", "err", err)
+			return 1
+		}
+		pol = &loaded
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		slog.Error("data dir", "err", err)
@@ -123,7 +134,8 @@ func run() int {
 			InputPerMillion:  cfg.InputPerMillion,
 			OutputPerMillion: cfg.OutputPerMillion,
 		},
-		Tel: telemetry.New(cfg.OTLPEndpoint),
+		Tel:    telemetry.New(cfg.OTLPEndpoint),
+		Policy: pol,
 		ModelFor: func(current store.Run) (model.Provider, error) {
 			return orch.ProviderFor(current, cfg)
 		},

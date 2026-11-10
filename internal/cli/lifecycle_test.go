@@ -75,10 +75,16 @@ func TestRunLifecyclePostsTheRunAndLeavesAttachAsDetach(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Stderr = w
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&stderr, r)
+		close(done)
+	}()
 	code := Run([]string{"agt", "help"})
-	w.Close()
+	_ = w.Close()
 	os.Stderr = old
-	_, _ = io.Copy(&stderr, r)
+	<-done
+	_ = r.Close()
 	if code != 0 || !strings.Contains(stderr.String(), "does not cancel") {
 		t.Fatalf("help %d %s", code, stderr.String())
 	}

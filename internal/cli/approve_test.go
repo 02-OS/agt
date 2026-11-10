@@ -136,10 +136,10 @@ func TestFixSendsAbsolutePathsFromAnotherDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.repo != wantRepo {
+	if !sameResolved(got.repo, wantRepo) {
 		t.Fatalf("repo_path %q want %q", got.repo, wantRepo)
 	}
-	if got.script != wantScript {
+	if !sameResolved(got.script, wantScript) {
 		t.Fatalf("script_path %q want %q", got.script, wantScript)
 	}
 	if !filepath.IsAbs(got.repo) || !filepath.IsAbs(got.script) {
@@ -148,6 +148,15 @@ func TestFixSendsAbsolutePathsFromAnotherDirectory(t *testing.T) {
 	if got.prov != "fake" {
 		t.Fatalf("provider %q", got.prov)
 	}
+}
+
+func sameResolved(got, want string) bool {
+	if got == want {
+		return true
+	}
+	left, err1 := filepath.EvalSymlinks(got)
+	right, err2 := filepath.EvalSymlinks(want)
+	return err1 == nil && err2 == nil && left == right
 }
 
 func TestFixDoesNotSubstituteSampleScript(t *testing.T) {

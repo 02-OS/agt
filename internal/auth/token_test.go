@@ -3,6 +3,7 @@ package auth
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -23,14 +24,18 @@ func TestTokenFileIsPrivateAndStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS == "windows" {
+		if err := FilePrivate(dir); err != nil {
+			t.Fatal(err)
+		}
+	} else if info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("token mode %o", info.Mode().Perm())
 	}
 	dirInfo, err := os.Lstat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dirInfo.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS != "windows" && dirInfo.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("data dir mode %o", dirInfo.Mode().Perm())
 	}
 	second, err := LoadOrCreate(dir)
@@ -47,6 +52,9 @@ func TestTokenFileIsPrivateAndStable(t *testing.T) {
 }
 
 func TestLooseTokenIsRotated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows chmod cannot make a token group-readable")
+	}
 	t.Setenv("AGT_TOKEN", "")
 	dir := t.TempDir()
 	path := filepath.Join(dir, fileName)
@@ -68,7 +76,11 @@ func TestLooseTokenIsRotated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS == "windows" {
+		if err := FilePrivate(dir); err != nil {
+			t.Fatal(err)
+		}
+	} else if info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("mode %o", info.Mode().Perm())
 	}
 	body, err := os.ReadFile(path)
