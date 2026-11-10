@@ -59,10 +59,15 @@ func TestPipedTuiRefusesTheSession(t *testing.T) {
 	}
 	oldOut, oldErr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = w, w
+	done := make(chan []byte, 1)
+	go func() {
+		body, _ := io.ReadAll(r)
+		done <- body
+	}()
 	code := Run([]string{"agt", "tui"})
 	_ = w.Close()
 	os.Stdout, os.Stderr = oldOut, oldErr
-	body, _ := io.ReadAll(r)
+	body := <-done
 	_ = r.Close()
 	if code != 2 || !strings.Contains(string(body), "needs a terminal") {
 		t.Fatalf("exit %d\n%s", code, body)

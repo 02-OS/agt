@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestAuditIsAppendOnlyAndPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("mode %o", info.Mode().Perm())
 	}
 	second := Event{Time: "2026-11-10T13:01:00Z", Kind: "state", RunID: "run_1", SandboxID: "agt-ns-run_1", State: "SUCCEEDED"}
@@ -84,7 +85,14 @@ func TestAuditRefusesSymlinkAndLooseMode(t *testing.T) {
 	if err := os.WriteFile(loose, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Append(loose, Event{Kind: "state"}); err == nil || !strings.Contains(err.Error(), "not private") {
+	err := Append(loose, Event{Kind: "state"})
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("loose: %v", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "not private") {
 		t.Fatalf("loose: %v", err)
 	}
 }

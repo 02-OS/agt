@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -379,8 +380,12 @@ func loginStatus(ctx context.Context, base []string) (string, error) {
 }
 
 func childEnv() []string {
+	keys := []string{"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME", "AGT_CODEX_STUB", "AGT_STUB_LOG", "AGT_STUB_MODE"}
+	if runtime.GOOS == "windows" {
+		keys = append(keys, "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE")
+	}
 	var env []string
-	for _, key := range []string{"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME", "AGT_CODEX_STUB", "AGT_STUB_LOG", "AGT_STUB_MODE"} {
+	for _, key := range keys {
 		if v, ok := os.LookupEnv(key); ok {
 			env = append(env, key+"="+v)
 		}
@@ -968,18 +973,21 @@ func vendorRootNear(dir string) string {
 	return ""
 }
 
-func profileArgs(work, runtime string) ([]string, error) {
-	if err := safeCodexPath(work); err != nil {
+func profileArgs(work, runtimeRoot string) ([]string, error) {
+	workPath, err := codexConfigPath(work)
+	if err != nil {
 		return nil, err
 	}
-	if runtime != "" {
-		if err := safeCodexPath(runtime); err != nil {
+	runtimePath := ""
+	if runtimeRoot != "" {
+		runtimePath, err = codexConfigPath(runtimeRoot)
+		if err != nil {
 			return nil, err
 		}
 	}
-	grants := []string{`":minimal"="read"`, fmt.Sprintf("%q=%q", work, "read")}
-	if runtime != "" {
-		grants = append(grants, fmt.Sprintf("%q=%q", runtime, "read"))
+	grants := []string{`":minimal"="read"`, fmt.Sprintf("%q=%q", workPath, "read")}
+	if runtimePath != "" {
+		grants = append(grants, fmt.Sprintf("%q=%q", runtimePath, "read"))
 	}
 	table := "{" + strings.Join(grants, ", ") + "}"
 	return []string{
@@ -997,11 +1005,15 @@ func profileArgs(work, runtime string) ([]string, error) {
 	}, nil
 }
 
-func safeCodexPath(path string) error {
-	if path == "" || strings.ContainsAny(path, "\"\n\r\\") {
-		return fmt.Errorf("refusing a Codex path that cannot be quoted safely")
+func codexConfigPath(path string) (string, error) {
+	cleaned := path
+	if runtime.GOOS == "windows" {
+		cleaned = filepath.ToSlash(path)
 	}
-	return nil
+	if cleaned == "" || strings.ContainsAny(cleaned, "\"\n\r\\") {
+		return "", fmt.Errorf("refusing a Codex path that cannot be quoted safely")
+	}
+	return cleaned, nil
 }
 
 func toolsDisabled(raw json.RawMessage) error {
@@ -1087,7 +1099,7 @@ func taggedPrompt(work, prompt string, excerpts []string) (string, error) {
 }
 
 func excerptPath(work, rel string) (string, error) {
-	if rel == "" || filepath.IsAbs(rel) || strings.Contains(rel, "..") {
+	if rel == "" || filepath.IsAbs(rel) || rel[0] == '/' || rel[0] == '\\' || strings.Contains(rel, "..") {
 		return "", fmt.Errorf("excerpt %q is not a relative snapshot path", rel)
 	}
 	clean := filepath.Clean(rel)

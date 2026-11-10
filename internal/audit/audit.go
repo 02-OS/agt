@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -198,7 +199,8 @@ func privateRegular(path string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("audit log is not a regular file")
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	// Windows reports a writable file as 0666. The Unix owner-only bit is not stored.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("audit log is not private")
 	}
 	return nil
