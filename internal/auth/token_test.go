@@ -52,6 +52,9 @@ func TestTokenFileIsPrivateAndStable(t *testing.T) {
 }
 
 func TestLooseTokenIsRotated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows chmod cannot make a token group-readable")
+	}
 	t.Setenv("AGT_TOKEN", "")
 	dir := t.TempDir()
 	path := filepath.Join(dir, fileName)
