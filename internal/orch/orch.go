@@ -59,6 +59,8 @@ type Options struct {
 	NewWorkspace func(store.Run) (workspace.Handle, error)
 	Hooks        Hooks
 	Tel          telemetry.Emitter
+	// Policy, when set, may only tighten an allow. Nil keeps Decide.
+	Policy *policy.File
 }
 
 type Orchestrator struct {
@@ -69,6 +71,7 @@ type Orchestrator struct {
 	newWorkspace func(store.Run) (workspace.Handle, error)
 	hooks        Hooks
 	tel          telemetry.Emitter
+	policy       *policy.File
 
 	mu   sync.Mutex
 	open map[string]workspace.Handle
@@ -88,6 +91,7 @@ func New(opts Options) *Orchestrator {
 		newWorkspace: opts.NewWorkspace,
 		hooks:        opts.Hooks,
 		tel:          tel,
+		policy:       opts.Policy,
 		open:         map[string]workspace.Handle{},
 		mark:         map[string]int64{},
 	}
@@ -260,7 +264,11 @@ func contextStop(ctx context.Context) error {
 }
 
 func (o *Orchestrator) modelTurn(ctx context.Context, current store.Run) error {
-	if current.MaxSteps >= 0 && current.StepCount >= current.MaxSteps {
+	maxSteps := current.MaxSteps
+	if o.policy != nil {
+		maxSteps = o.policy.StepLimit(current.MaxSteps)
+	}
+	if maxSteps >= 0 && current.StepCount >= maxSteps {
 		return o.pauseForBudget(ctx, current, "step budget exhausted", 0)
 	}
 	turns, err := o.requestTurns(ctx, current)
@@ -344,6 +352,9 @@ func (o *Orchestrator) modelTurn(ctx context.Context, current store.Run) error {
 			}
 		}
 		denyProtectedEdit(current, resp.Tool, &decision)
+		if o.policy != nil {
+			decision = o.policy.Tighten(decision)
+		}
 		intent.Kind = "tool"
 		intent.Tool = resp.Tool
 		intent.Canonical = decision.Canonical
@@ -535,6 +546,16 @@ func (o *Orchestrator) verify(ctx context.Context, current store.Run) error {
 	}
 	if verify.NeedsContract(current.TaskType) {
 		return o.verifyContract(ctx, current)
+	}
+	if o.policy != nil {
+		decision, err := policy.Decide("run_test", []byte(`{}`))
+		if err != nil {
+			return err
+		}
+		decision = o.policy.Tighten(decision)
+		if decision.Decision != policy.Allow {
+			return o.finishUnverified(ctx, current, "verification_unavailable", decision.Reason)
+		}
 	}
 	ws, err := o.workspace(ctx, current)
 	if err != nil {
