@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -306,6 +307,9 @@ func TestDoctorNamesTheFirstFailure(t *testing.T) {
 }
 
 func TestLooseTokenAndDataDirNameTheNextCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not store Unix permission bits")
+	}
 	t.Setenv("AGT_TOKEN", "")
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil {
