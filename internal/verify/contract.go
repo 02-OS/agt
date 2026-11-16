@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -326,13 +328,18 @@ func canonicalBytes(contract Contract) ([]byte, error) {
 
 // Protects reports whether a repository-relative path is one of the check files.
 func (c Contract) Protects(path string) bool {
-	slash := filepath.ToSlash(strings.TrimSpace(path))
-	if slash == "" || slash == "." {
+	rel, err := tools.SafeRel(strings.TrimSpace(path))
+	if err != nil {
 		return false
 	}
+	slash := filepath.ToSlash(rel)
 	for _, check := range c.Checks {
 		for _, item := range check.Paths {
-			if filepath.ToSlash(item) == slash {
+			itemRel, err := tools.SafeRel(strings.TrimSpace(item))
+			if err != nil {
+				continue
+			}
+			if filepath.ToSlash(itemRel) == slash {
 				return true
 			}
 		}
@@ -386,6 +393,15 @@ func Classify(exit int, output string, runErr error) (string, string) {
 	return KindInfrastructure, "unrecognized test result"
 }
 
+var (
+	goTestOKRE      = regexp.MustCompile(`(?m)^ok\s+\S+`)
+	goTestFailRE    = regexp.MustCompile(`(?m)^FAIL\s+\S+`)
+	nodePassRE      = regexp.MustCompile(`(?m)^(?:#|ℹ)\s*pass\s+([1-9]\d*)\b`)
+	nodeFailRE      = regexp.MustCompile(`(?m)^(?:#|ℹ)\s*fail\s+([1-9]\d*)\b`)
+	nodeTestsZeroRE = regexp.MustCompile(`(?m)^(?:#|ℹ)\s*tests\s+0\b`)
+	cargoResultOKRE = regexp.MustCompile(`(?m)^test result: ok\.\s+(\d+)\s+passed;\s+(\d+)\s+failed;`)
+)
+
 func emptyRun(lower string) bool {
 	for _, pattern := range []string{
 		"ran 0 tests",
@@ -399,17 +415,52 @@ func emptyRun(lower string) bool {
 			return true
 		}
 	}
+	if nodeTestsZeroRE.MatchString(lower) && !nodePassRE.MatchString(lower) {
+		return true
+	}
+	if matches := cargoResultOKRE.FindAllStringSubmatch(lower, -1); len(matches) > 0 {
+		totalPassed, totalFailed := 0, 0
+		for _, m := range matches {
+			p, _ := strconv.Atoi(m[1])
+			f, _ := strconv.Atoi(m[2])
+			totalPassed += p
+			totalFailed += f
+		}
+		if totalPassed == 0 && totalFailed == 0 {
+			return true
+		}
+	}
 	return false
 }
 
 func realPass(output string) bool {
+	if realFail(output) {
+		return false
+	}
 	lower := strings.ToLower(output)
 	if strings.Contains(lower, "ran ") && !strings.Contains(lower, "ran 0 ") {
 		trimmed := strings.TrimSpace(lower)
 		return strings.HasSuffix(trimmed, "ok") || strings.Contains(lower, "\nok")
 	}
 	trimmed := strings.TrimSpace(output)
-	if strings.HasPrefix(trimmed, "PASS") || strings.Contains(output, "\nPASS\n") || strings.Contains(output, "ok \t") || strings.Contains(output, "ok\t") {
+	if strings.HasPrefix(trimmed, "PASS") || strings.Contains(output, "\nPASS\n") || goTestOKRE.MatchString(output) {
+		return true
+	}
+	if nodePassRE.MatchString(output) {
+		return true
+	}
+	if matches := cargoResultOKRE.FindAllStringSubmatch(output, -1); len(matches) > 0 {
+		totalPassed, totalFailed := 0, 0
+		for _, m := range matches {
+			p, _ := strconv.Atoi(m[1])
+			f, _ := strconv.Atoi(m[2])
+			totalPassed += p
+			totalFailed += f
+		}
+		if totalPassed > 0 && totalFailed == 0 {
+			return true
+		}
+	} else if strings.Contains(output, "test result: ok.") {
 		return true
 	}
 	for _, line := range strings.Split(output, "\n") {
@@ -425,12 +476,15 @@ func realFail(output string) bool {
 		return true
 	}
 	trimmed := strings.TrimSpace(output)
-	if strings.HasPrefix(trimmed, "FAIL") || strings.Contains(output, "\nFAIL\n") || strings.Contains(output, "\nFAIL\t") {
+	if strings.HasPrefix(trimmed, "FAIL") || strings.Contains(output, "\nFAIL\n") || strings.Contains(output, "\nFAIL\t") || goTestFailRE.MatchString(output) {
+		return true
+	}
+	if nodeFailRE.MatchString(output) {
 		return true
 	}
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.EqualFold(line, "failed") || strings.HasPrefix(line, "not ok") {
+		if strings.EqualFold(line, "failed") || line == "not ok" || strings.HasPrefix(line, "not ok ") || strings.HasPrefix(line, "not ok\t") {
 			return true
 		}
 	}

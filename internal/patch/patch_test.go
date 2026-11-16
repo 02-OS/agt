@@ -266,3 +266,59 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(body)
 }
+
+func TestRollbackRestoresAddedModifiedDeletedAndRejectsConflicts(t *testing.T) {
+	base, work, repo := t.TempDir(), t.TempDir(), t.TempDir()
+	// Initial files in repo and base.
+	for _, root := range []string{base, repo} {
+		mustWrite(t, filepath.Join(root, "mod.txt"), []byte("before\n"), 0o644)
+		mustWrite(t, filepath.Join(root, "del.txt"), []byte("gone later\n"), 0o644)
+	}
+	// Work adds, modifies, and deletes.
+	mustWrite(t, filepath.Join(work, "mod.txt"), []byte("after\n"), 0o644)
+	mustWrite(t, filepath.Join(work, "add.txt"), []byte("brand new\n"), 0o644)
+
+	art, err := Build(base, work, Meta{RunID: "run_rb", RepoPath: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rbDir := filepath.Join(t.TempDir(), "rb_1")
+	if err := Apply(repo, art, rbDir); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, filepath.Join(repo, "mod.txt")) != "after\n" || readFile(t, filepath.Join(repo, "add.txt")) != "brand new\n" {
+		t.Fatal("apply did not write expected content")
+	}
+	if _, err := os.Stat(filepath.Join(repo, "del.txt")); !os.IsNotExist(err) {
+		t.Fatal("del.txt still exists after apply")
+	}
+
+	// Conflicting post-apply edit must abort Rollback without partial changes.
+	mustWrite(t, filepath.Join(repo, "mod.txt"), []byte("user edited\n"), 0o644)
+	if err := Rollback(rbDir, repo); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict on modified post-image, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "add.txt")); err != nil {
+		t.Fatal("conflicting rollback still removed add.txt")
+	}
+
+	// Restore exact post-image, then Rollback cleanly.
+	mustWrite(t, filepath.Join(repo, "mod.txt"), []byte("after\n"), 0o644)
+	if err := Rollback(rbDir, repo); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	if readFile(t, filepath.Join(repo, "mod.txt")) != "before\n" {
+		t.Fatalf("mod.txt not restored: %q", readFile(t, filepath.Join(repo, "mod.txt")))
+	}
+	if readFile(t, filepath.Join(repo, "del.txt")) != "gone later\n" {
+		t.Fatalf("del.txt not restored: %q", readFile(t, filepath.Join(repo, "del.txt")))
+	}
+	if _, err := os.Stat(filepath.Join(repo, "add.txt")); !os.IsNotExist(err) {
+		t.Fatal("add.txt still exists after rollback")
+	}
+
+	// Double rollback refused cleanly.
+	if err := Rollback(rbDir, repo); !errors.Is(err, ErrConflict) {
+		t.Fatalf("double rollback should conflict, got %v", err)
+	}
+}

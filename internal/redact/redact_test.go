@@ -35,3 +35,21 @@ func TestTextHidesSecretsAndKeepsCode(t *testing.T) {
 		t.Fatalf("public key removed\n%s", out)
 	}
 }
+
+func TestTextRedactsPrefixedEnvAndJSONPairs(t *testing.T) {
+	src := strings.Join([]string{
+		"OPENAI_API_KEY=sk-prefixed-env-secret",
+		"DATABASE_PASSWORD=dbsecretvalue",
+		`{"api_key": "json_secret_spaced", "token":"json_tok_compact"}`,
+		"token := config",
+	}, "\n")
+	out := Text(src)
+	for _, secret := range []string{"sk-prefixed-env-secret", "dbsecretvalue", "json_secret_spaced", "json_tok_compact"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("secret leaked %q in:\n%s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "token := config") {
+		t.Fatalf("normal Go assignment rewritten:\n%s", out)
+	}
+}

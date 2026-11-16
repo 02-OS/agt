@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/csy20/agt/internal/diag"
 	"github.com/csy20/agt/internal/id"
 	"github.com/csy20/agt/internal/run"
+	"github.com/csy20/agt/internal/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,6 +41,11 @@ type Store struct {
 	// resetToken is empty on a production store. Reset runs only when this
 	// token matches the harness row in a disposable database.
 	resetToken string
+
+	subMu        sync.Mutex
+	subs         map[string]map[chan struct{}]struct{}
+	listenCancel context.CancelFunc
+	listenWG     sync.WaitGroup
 }
 
 type Run struct {
@@ -142,33 +149,167 @@ func Open(ctx context.Context, url string) (*Store, error) {
 	return &Store{pool: pool}, nil
 }
 
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() {
+	s.subMu.Lock()
+	cancel := s.listenCancel
+	s.listenCancel = nil
+	s.subs = nil
+	s.subMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.listenWG.Wait()
+	s.pool.Close()
+}
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
+// SubscribeRun returns a channel signaled when runID receives an event or
+// state transition, plus an unsubscribe function that must be called when done.
+func (s *Store) SubscribeRun(runID string) (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	s.subMu.Lock()
+	if s.subs == nil {
+		s.subs = map[string]map[chan struct{}]struct{}{}
+	}
+	set, ok := s.subs[runID]
+	if !ok {
+		set = map[chan struct{}]struct{}{}
+		s.subs[runID] = set
+	}
+	set[ch] = struct{}{}
+	if s.listenCancel == nil && s.pool != nil {
+		lctx, cancel := context.WithCancel(context.Background())
+		s.listenCancel = cancel
+		s.listenWG.Add(1)
+		go s.listenLoop(lctx)
+	}
+	s.subMu.Unlock()
+	return ch, func() {
+		var cancel context.CancelFunc
+		s.subMu.Lock()
+		if set := s.subs[runID]; set != nil {
+			delete(set, ch)
+			if len(set) == 0 {
+				delete(s.subs, runID)
+			}
+		}
+		if len(s.subs) == 0 && s.listenCancel != nil {
+			cancel = s.listenCancel
+			s.listenCancel = nil
+		}
+		s.subMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	}
+}
+
+// NotifyRun wakes local subscribers watching runID.
+func (s *Store) NotifyRun(runID string) {
+	if s == nil {
+		return
+	}
+	s.subMu.Lock()
+	set := s.subs[runID]
+	for ch := range set {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	s.subMu.Unlock()
+}
+
+func (s *Store) listenLoop(ctx context.Context) {
+	defer s.listenWG.Done()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		conn, err := s.pool.Acquire(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+		if _, err := conn.Exec(ctx, `LISTEN agt_run_events`); err != nil {
+			conn.Release()
+			if ctx.Err() != nil {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+		for {
+			note, err := conn.Conn().WaitForNotification(ctx)
+			if err != nil {
+				break
+			}
+			if note != nil && note.Payload != "" {
+				s.NotifyRun(note.Payload)
+			}
+		}
+		_, _ = conn.Exec(context.Background(), `UNLISTEN agt_run_events`)
+		conn.Release()
+	}
+}
+
+type migrationSpec struct {
+	version int
+	name    string
+}
+
+var migrations = []migrationSpec{
+	{1, "migrations/001_init.sql"},
+	{2, "migrations/002_profile.sql"},
+	{3, "migrations/003_transcript.sql"},
+	{4, "migrations/004_lease.sql"},
+	{5, "migrations/005_interaction.sql"},
+	{6, "migrations/006_sessions.sql"},
+	{7, "migrations/007_models.sql"},
+	{8, "migrations/008_verify.sql"},
+}
+
 func (s *Store) Migrate(ctx context.Context) error {
-	if err := s.applyMigration(ctx, 1, "migrations/001_init.sql"); err != nil {
+	maxVer, err := s.maxMigrationVersion(ctx)
+	if err != nil {
 		return err
 	}
-	if err := s.applyMigration(ctx, 2, "migrations/002_profile.sql"); err != nil {
-		return err
+	for _, m := range migrations {
+		if m.version <= maxVer {
+			continue
+		}
+		if err := s.applyMigration(ctx, m.version, m.name); err != nil {
+			return err
+		}
 	}
-	if err := s.applyMigration(ctx, 3, "migrations/003_transcript.sql"); err != nil {
-		return err
+	return nil
+}
+
+func (s *Store) maxMigrationVersion(ctx context.Context) (int, error) {
+	var name *string
+	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('public.schema_migrations')`).Scan(&name); err != nil {
+		return 0, err
 	}
-	if err := s.applyMigration(ctx, 4, "migrations/004_lease.sql"); err != nil {
-		return err
+	if name == nil {
+		return 0, nil
 	}
-	if err := s.applyMigration(ctx, 5, "migrations/005_interaction.sql"); err != nil {
-		return err
+	var maxVer int
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&maxVer); err != nil {
+		return 0, err
 	}
-	if err := s.applyMigration(ctx, 6, "migrations/006_sessions.sql"); err != nil {
-		return err
-	}
-	if err := s.applyMigration(ctx, 7, "migrations/007_models.sql"); err != nil {
-		return err
-	}
-	return s.applyMigration(ctx, 8, "migrations/008_verify.sql")
+	return maxVer, nil
 }
 
 func (s *Store) applyMigration(ctx context.Context, version int, name string) error {
@@ -378,6 +519,9 @@ func (s *Store) Transition(ctx context.Context, runID string, fromVersion int64,
 		out, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id=$1`, runID))
 		return err
 	})
+	if err == nil {
+		s.NotifyRun(runID)
+	}
 	return out, err
 }
 
@@ -391,6 +535,9 @@ func (s *Store) AppendEvent(ctx context.Context, runID, typ, actorType, actorID 
 		seq, err = appendEvent(ctx, tx, runID, typ, actorType, actorID, payload)
 		return err
 	})
+	if err == nil {
+		s.NotifyRun(runID)
+	}
 	return seq, err
 }
 
@@ -519,6 +666,28 @@ func (s *Store) UsageTotal(ctx context.Context, runID string) (int64, error) {
 	return n, err
 }
 
+func (s *Store) RunMetrics(ctx context.Context) (telemetry.RunStats, error) {
+	stats := telemetry.RunStats{ByState: map[string]int64{}}
+	rows, err := s.pool.Query(ctx, `SELECT state, COUNT(*), COALESCE(SUM(spent_micros), 0) FROM runs GROUP BY state`)
+	if err != nil {
+		return stats, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var st string
+		var cnt, spent int64
+		if err := rows.Scan(&st, &cnt, &spent); err != nil {
+			return stats, err
+		}
+		stats.ByState[st] = cnt
+		stats.TotalCostMicros += spent
+		if !run.IsTerminal(run.State(st)) {
+			stats.Active += cnt
+		}
+	}
+	return stats, rows.Err()
+}
+
 type scrubKey struct{}
 
 func (s *Store) withTx(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {
@@ -602,5 +771,8 @@ func appendEvent(ctx context.Context, tx pgx.Tx, runID, typ, actorType, actorID 
 			$2, $3, $4, $5::jsonb
 		)
 		RETURNING sequence_no`, runID, typ, actorType, actorID, string(body)).Scan(&seq)
+	if err == nil {
+		_, _ = tx.Exec(ctx, `SELECT pg_notify('agt_run_events', $1)`, runID)
+	}
 	return seq, err
 }

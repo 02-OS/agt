@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/csy20/agt/internal/policy"
@@ -94,5 +95,50 @@ func TestAuditRefusesSymlinkAndLooseMode(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "not private") {
 		t.Fatalf("loose: %v", err)
+	}
+}
+
+func TestAuditConcurrentAppendAndTailCacheRecovery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "concurrent.jsonl")
+	const workers = 6
+	const perWorker = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, workers*perWorker)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				if err := Append(path, Event{Kind: "state", RunID: "run_conc", State: "EXECUTING"}); err != nil {
+					errs <- err
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent append error: %v", err)
+	}
+
+	// Simulate fresh process restart clearing in-memory tailCache.
+	tailMu.Lock()
+	delete(tailCache, pathKey(path))
+	tailMu.Unlock()
+
+	if err := Append(path, Event{Kind: "state", RunID: "run_conc", State: "SUCCEEDED"}); err != nil {
+		t.Fatalf("append after cache clear: %v", err)
+	}
+	events, err := Replay(path)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	want := workers*perWorker + 1
+	if len(events) != want {
+		t.Fatalf("got %d events, want %d", len(events), want)
+	}
+	if events[want-1].Seq != int64(want) {
+		t.Fatalf("last seq %d, want %d", events[want-1].Seq, want)
 	}
 }

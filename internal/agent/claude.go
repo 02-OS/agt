@@ -108,7 +108,7 @@ func (s *Stream) parseClaudeMessage(raw json.RawMessage, parent *string, user bo
 			if user {
 				return protocolf("tool_use in a user message")
 			}
-			req, err := translateClaudeTool(block, subagent)
+			req, err := translateClaudeToolWithMode(block, subagent, s.mode)
 			if err != nil {
 				return err
 			}
@@ -228,5 +228,20 @@ func (s *Stream) recordClaudeCost(raw json.RawMessage) error {
 
 func claudeVersionSupported(v string) bool {
 	major, minor, patch, ok := parseSemver(v)
-	return ok && major == 2 && minor == 1 && patch >= 259
+	if !ok {
+		return false
+	}
+	if major > 2 {
+		return true
+	}
+	if major < 2 {
+		return false
+	}
+	if minor > 1 {
+		return true
+	}
+	if minor < 1 {
+		return false
+	}
+	return patch >= 259
 }

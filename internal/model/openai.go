@@ -390,10 +390,76 @@ func readLimited(r io.Reader, limit int) ([]byte, error) {
 }
 
 func capabilityRejected(raw []byte) bool {
-	text := strings.ToLower(string(raw))
-	for _, word := range []string{"stream", "max_tokens", "stream_options", "include_usage"} {
-		if strings.Contains(text, word) {
+	var doc struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+		Param   string          `json:"param"`
+		Code    string          `json:"code"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &doc); err != nil {
+		return false
+	}
+	param := strings.ToLower(strings.TrimSpace(doc.Param))
+	code := strings.ToLower(strings.TrimSpace(doc.Code))
+	msg := strings.ToLower(strings.TrimSpace(doc.Message))
+	if len(doc.Error) > 0 && string(doc.Error) != "null" {
+		var errStr string
+		if json.Unmarshal(doc.Error, &errStr) == nil {
+			if msg == "" {
+				msg = strings.ToLower(strings.TrimSpace(errStr))
+			}
+		} else {
+			var errObj struct {
+				Message string `json:"message"`
+				Param   string `json:"param"`
+				Code    string `json:"code"`
+			}
+			if json.Unmarshal(doc.Error, &errObj) == nil {
+				if param == "" {
+					param = strings.ToLower(strings.TrimSpace(errObj.Param))
+				}
+				if code == "" {
+					code = strings.ToLower(strings.TrimSpace(errObj.Code))
+				}
+				if msg == "" {
+					msg = strings.ToLower(strings.TrimSpace(errObj.Message))
+				}
+			}
+		}
+	}
+	isCapParam := func(s string) bool {
+		switch s {
+		case "stream", "max_tokens", "stream_options", "include_usage", "stream_options.include_usage":
 			return true
+		default:
+			return false
+		}
+	}
+	if isCapParam(param) {
+		return true
+	}
+	mentionsCap := false
+	for _, word := range []string{"stream_options", "include_usage", "max_tokens", "stream"} {
+		if strings.Contains(msg, word) {
+			mentionsCap = true
+			break
+		}
+	}
+	if !mentionsCap {
+		return false
+	}
+	if code == "unsupported_parameter" || code == "unknown_parameter" || code == "unrecognized_request_argument" {
+		return true
+	}
+	if param == "" {
+		for _, hint := range []string{
+			"not supported", "unsupported", "unrecognized", "unknown parameter",
+			"unknown field", "unexpected", "extra inputs", "not allowed", "not permitted",
+			"invalid parameter", "cannot use",
+		} {
+			if strings.Contains(msg, hint) {
+				return true
+			}
 		}
 	}
 	return false

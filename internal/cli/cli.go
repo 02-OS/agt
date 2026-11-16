@@ -58,6 +58,12 @@ func Run(args []string) int {
 		return agentCmd(args[2:])
 	case "setup":
 		return setupCmd(args[2:])
+	case "audit":
+		return auditCmd(args[2:])
+	case "rollback":
+		return rollbackCmd(args[2:])
+	case "gc":
+		return gcCmd(args[2:])
 	case "completion":
 		return completion(args[2:])
 	case "help", "-h", "--help":
@@ -85,6 +91,9 @@ func usageText() {
   agt run diff RUN
   agt run export RUN --output FILE
   agt run apply RUN --digest DIGEST
+  agt rollback RUN [--id ID] [--list] [--json]
+  agt gc [--max-age DURATION] [--dry-run] [--json]
+  agt audit verify [--file PATH] [--json]
   agt run pause RUN
   agt run resume RUN
   agt run budget-resume RUN [--budget-cents N]
@@ -268,6 +277,8 @@ func runCmd(args []string) int {
 		return exportCmd(args[1:])
 	case "apply":
 		return applyCmd(args[1:])
+	case "rollback":
+		return rollbackCmd(args[1:])
 	case "pause":
 		return lifecycleCmd("pause", args[1:])
 	case "resume":

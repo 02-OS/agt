@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -166,6 +167,77 @@ func TestMaterializeCopiesDotfilesAndExecutableBits(t *testing.T) {
 		}
 		if runtime.GOOS != "windows" && st.Mode().Perm()&0o111 == 0 {
 			t.Fatalf("executable bit cleared in %s: %o", root, st.Mode().Perm())
+		}
+	}
+}
+
+func TestMaterializeGitWorktreeWithDirtyOverlayAndExclusions(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	src := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", src}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.name", "Test")
+	runGit("config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(src, "app.py"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "to_delete.py"), []byte("bye\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "app.py", "to_delete.py")
+	runGit("commit", "-m", "init")
+
+	// Dirty changes + untracked file + excluded dirs/secrets.
+	if err := os.WriteFile(filepath.Join(src, "app.py"), []byte("v2_dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(src, "to_delete.py")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "untracked.py"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, ".env"), []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(src, ".02agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, ".02agent", "state.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	work, base, err := MaterializeWithBackend(src, t.TempDir(), "run_wt", BackendGitWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{work, base} {
+		body, err := os.ReadFile(filepath.Join(root, "app.py"))
+		if err != nil || string(body) != "v2_dirty\n" {
+			t.Fatalf("%s app.py = %q %v", root, body, err)
+		}
+		if body, err := os.ReadFile(filepath.Join(root, "untracked.py")); err != nil || string(body) != "new\n" {
+			t.Fatalf("%s untracked.py = %q %v", root, body, err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "to_delete.py")); !os.IsNotExist(err) {
+			t.Fatalf("%s deleted file still present", root)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".env")); !os.IsNotExist(err) {
+			t.Fatalf("%s .env copied", root)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".02agent")); !os.IsNotExist(err) {
+			t.Fatalf("%s .02agent copied", root)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".git")); !os.IsNotExist(err) {
+			t.Fatalf("%s .git present", root)
 		}
 	}
 }

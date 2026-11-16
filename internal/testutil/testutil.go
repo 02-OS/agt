@@ -224,7 +224,7 @@ func (e *Engine) MustProfile(t *testing.T, req profile.Request) profile.Profile 
 	t.Helper()
 	images := e.images
 	if len(images.List()) == 0 {
-		images = profile.Images{Python: "host", Go: "host", Node: "host"}
+		images = profile.Images{Python: "host", Go: "host", Node: "host", Rust: "host"}
 	}
 	prof, err := profile.Resolve(req, images, runtime.GOARCH)
 	if err != nil {
@@ -243,9 +243,10 @@ func TestImages(t *testing.T) profile.Images {
 	}
 	goImage := os.Getenv("AGT_IMAGE_GO")
 	node := os.Getenv("AGT_IMAGE_NODE")
-	if python == "" && goImage == "" && node == "" {
+	rust := os.Getenv("AGT_IMAGE_RUST")
+	if python == "" && goImage == "" && node == "" && rust == "" {
 		if os.Getenv("AGT_INTEGRATION") == "1" {
-			t.Fatal("AGT_INTEGRATION=1 requires AGT_IMAGE_PYTHON, AGT_IMAGE_GO, and AGT_IMAGE_NODE")
+			t.Fatal("AGT_INTEGRATION=1 requires AGT_IMAGE_PYTHON, AGT_IMAGE_GO, AGT_IMAGE_NODE, and AGT_IMAGE_RUST")
 		}
 		return profile.Images{}
 	}
@@ -255,12 +256,16 @@ func TestImages(t *testing.T) profile.Images {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Fatalf("sandbox images are set and docker is absent: %v", err)
 	}
-	for _, image := range []string{python, goImage, node} {
+	check := []string{python, goImage, node}
+	if rust != "" {
+		check = append(check, rust)
+	}
+	for _, image := range check {
 		if err := exec.Command("docker", "image", "inspect", image).Run(); err != nil {
 			t.Fatalf("sandbox image %s is not available: %v", image, err)
 		}
 	}
-	return profile.Images{Python: python, Go: goImage, Node: node}
+	return profile.Images{Python: python, Go: goImage, Node: node, Rust: rust}
 }
 
 // missingPrereq reports whether a missing dependency must fail the test.

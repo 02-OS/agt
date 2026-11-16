@@ -24,21 +24,60 @@ func ShouldSweep(state run.State, found bool) bool {
 	}
 }
 
-// ParseRunLabels reads one docker `--format '{{json .Labels}}'` line.
+// ParseRunLabels reads one docker `--format '{{json .Labels}}'` line or `k=v,...` label string.
 func ParseRunLabels(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" {
 		return "", false
 	}
 	var labels map[string]string
-	if err := json.Unmarshal([]byte(raw), &labels); err != nil {
-		return "", false
+	switch raw[0] {
+	case '{':
+		if err := json.Unmarshal([]byte(raw), &labels); err != nil {
+			return "", false
+		}
+	case '"':
+		var line string
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			return "", false
+		}
+		var ok bool
+		labels, ok = parseLabelPairs(line)
+		if !ok {
+			return "", false
+		}
+	default:
+		var ok bool
+		labels, ok = parseLabelPairs(raw)
+		if !ok {
+			return "", false
+		}
 	}
 	id := strings.TrimSpace(labels["agt-run"])
 	if id == "" {
 		return "", false
 	}
 	return id, true
+}
+
+func parseLabelPairs(s string) (map[string]string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || !strings.Contains(s, "=") {
+		return nil, false
+	}
+	labels := map[string]string{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			return nil, false
+		}
+		labels[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return labels, len(labels) > 0
 }
 
 // Sweep removes containers whose runs are terminal, paused, cancelled, or gone.

@@ -21,11 +21,11 @@ func completion(args []string) int {
 }
 
 func rootCommands() []string {
-	return []string{"fix", "feature", "refactor", "profile", "approve", "run", "doctor", "setup", "tui", "session", "model", "agent", "completion", "version", "help"}
+	return []string{"fix", "feature", "refactor", "profile", "approve", "run", "rollback", "gc", "audit", "doctor", "setup", "tui", "session", "model", "agent", "completion", "version", "help"}
 }
 
 func runCommands() []string {
-	return []string{"create", "status", "attach", "list", "diff", "export", "apply", "pause", "resume", "budget-resume", "cancel", "cleanup"}
+	return []string{"create", "status", "attach", "list", "diff", "export", "apply", "rollback", "pause", "resume", "budget-resume", "cancel", "cleanup"}
 }
 
 func completionScript(shell string) (string, bool) {

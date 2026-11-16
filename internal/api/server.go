@@ -25,6 +25,7 @@ import (
 	"github.com/csy20/agt/internal/profile"
 	"github.com/csy20/agt/internal/run"
 	"github.com/csy20/agt/internal/store"
+	"github.com/csy20/agt/internal/telemetry"
 	"github.com/csy20/agt/internal/verify"
 	"github.com/csy20/agt/internal/version"
 	"github.com/csy20/agt/internal/workspace"
@@ -37,6 +38,13 @@ type Server struct {
 	// Cleanup removes abandoned sandbox containers. The API does not import
 	// the sandbox package; the daemon injects this.
 	Cleanup func(context.Context) (int, error)
+	// VerifyExec runs sandboxed checks for agent patch verification without
+	// importing sandbox in internal/api; the daemon injects this.
+	VerifyExec func(context.Context, string, string, profile.Profile) (string, string, int, error)
+	// VerifyCleanup destroys the sandbox container created by VerifyExec.
+	VerifyCleanup func(context.Context, string) error
+	// Metrics holds in-process daemon operational counters and histograms.
+	Metrics *telemetry.Metrics
 	// AgentProbe lists coding-agent executables. Nil runs `--version` only.
 	// It does not start a Codex or Claude task.
 	AgentProbe agent.VersionFunc
@@ -61,16 +69,18 @@ func New(st *store.Store, cfg config.Config, token string) *Server {
 			})
 		}
 	}
-	return &Server{Store: st, Config: cfg, Token: token}
+	return &Server{Store: st, Config: cfg, Token: token, Metrics: telemetry.NewMetrics()}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("GET /v1/identity", s.identity)
 	mux.HandleFunc("GET /v1/models", s.listModels)
 	mux.HandleFunc("GET /v1/agents", s.listAgents)
 	mux.HandleFunc("POST /v1/agents/codex/ask", s.codexAsk)
+	mux.HandleFunc("POST /v1/agents/verify", s.verifyAgentPatch)
 	mux.HandleFunc("POST /v1/models/select", s.selectModel)
 	mux.HandleFunc("POST /v1/runs", s.createRun)
 	mux.HandleFunc("GET /v1/runs", s.listRuns)
@@ -82,11 +92,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}/diff", s.diff)
 	mux.HandleFunc("GET /v1/runs/{id}/patch", s.patchArtifact)
 	mux.HandleFunc("POST /v1/runs/{id}/apply", s.apply)
+	mux.HandleFunc("GET /v1/runs/{id}/rollbacks", s.rollbacks)
+	mux.HandleFunc("POST /v1/runs/{id}/rollback", s.rollback)
 	mux.HandleFunc("POST /v1/runs/{id}/pause", s.pause)
 	mux.HandleFunc("POST /v1/runs/{id}/resume", s.resume)
 	mux.HandleFunc("POST /v1/runs/{id}/budget-resume", s.budgetResume)
 	mux.HandleFunc("POST /v1/runs/{id}/cancel", s.cancel)
 	mux.HandleFunc("POST /v1/cleanup", s.cleanup)
+	mux.HandleFunc("POST /v1/gc", s.gc)
 	mux.HandleFunc("POST /v1/sessions", s.createSession)
 	mux.HandleFunc("GET /v1/sessions", s.listSessions)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.readSession)
@@ -108,6 +121,22 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	s.stamp(w)
+	var stats telemetry.RunStats
+	if s.Store != nil {
+		loaded, err := s.Store.RunMetrics(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		stats = loaded
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, s.Metrics.Render(stats))
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
@@ -212,13 +241,9 @@ func (s *Server) prepareRun(body []byte, preferred string) (store.CreateInput, i
 	if strings.TrimSpace(req.Goal) == "" {
 		return store.CreateInput{}, http.StatusBadRequest, "goal is required"
 	}
-	repo, err := filepath.Abs(req.RepoPath)
+	repo, err := workspace.CanonicalRepo(req.RepoPath)
 	if err != nil {
-		return store.CreateInput{}, http.StatusBadRequest, "repo_path"
-	}
-	info, err := os.Stat(repo)
-	if err != nil || !info.IsDir() {
-		return store.CreateInput{}, http.StatusBadRequest, "repo_path is not a directory"
+		return store.CreateInput{}, http.StatusBadRequest, err.Error()
 	}
 	if s.Config.DataDir != "" {
 		if err := workspace.Overlap(repo, s.Config.DataDir); err != nil {
@@ -323,7 +348,7 @@ func (s *Server) prepareRun(body []byte, preferred string) (store.CreateInput, i
 		BudgetCents:    budget,
 		MaxSteps:       maxSteps,
 		WallSeconds:    wall,
-		AgentVersion:   version.Compute(images.Python, images.Go, images.Node),
+		AgentVersion:   version.Compute(images.Python, images.Go, images.Node, images.Rust),
 		Provider:       provider,
 		ScriptPath:     scriptPath,
 		ScriptJSON:     script,
@@ -392,28 +417,41 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, runID string, af
 	s.stamp(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	idleTicks := 0
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	var notify <-chan struct{}
+	if s.Store != nil {
+		var unsubscribe func()
+		notify, unsubscribe = s.Store.SubscribeRun(runID)
+		defer unsubscribe()
+	}
+
+	backoff := streamPollMin
+	lastBeat := time.Now()
 	for {
 		if r.Context().Err() != nil {
+			return
+		}
+		if s.Store == nil {
 			return
 		}
 		evs, err := s.Store.EventsAfter(r.Context(), runID, after)
 		if err != nil {
 			return
 		}
-		if len(evs) == 0 {
-			idleTicks++
-			if idleTicks >= heartbeatEvery {
-				idleTicks = 0
-				fmt.Fprintf(w, ": heartbeat\n\n")
-				flusher.Flush()
-			}
-		} else {
-			idleTicks = 0
+		if len(evs) > 0 {
+			backoff = streamPollMin
+			lastBeat = time.Now()
 			for _, ev := range evs {
 				fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, ev.Type, ev.Payload)
 				after = ev.Seq
 			}
+			flusher.Flush()
+		} else if time.Since(lastBeat) >= streamHeartbeat {
+			lastBeat = time.Now()
+			_, _ = fmt.Fprint(w, ": heartbeat\n\n")
 			flusher.Flush()
 		}
 		current, err := s.Store.GetRun(r.Context(), runID)
@@ -427,19 +465,36 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, runID string, af
 			}
 			continue
 		}
-		timer := time.NewTimer(streamPoll)
+		wait := backoff
+		if untilBeat := streamHeartbeat - time.Since(lastBeat); untilBeat > 0 && untilBeat < wait {
+			wait = untilBeat
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-r.Context().Done():
 			timer.Stop()
 			return
+		case _, open := <-notify:
+			timer.Stop()
+			if !open {
+				return
+			}
+			backoff = streamPollMin
 		case <-timer.C:
+			if backoff < streamPollMax {
+				backoff *= 2
+				if backoff > streamPollMax {
+					backoff = streamPollMax
+				}
+			}
 		}
 	}
 }
 
 const (
-	streamPoll     = 150 * time.Millisecond
-	heartbeatEvery = 100 // about 15s at streamPoll, so a client can notice a dead connection
+	streamPollMin   = 150 * time.Millisecond
+	streamPollMax   = 1 * time.Second
+	streamHeartbeat = 15 * time.Second
 )
 
 func stopStream(state run.State) bool {
@@ -451,6 +506,9 @@ func (s *Server) listCommands(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	for i := range cmds {
+		cmds[i] = s.hideCommand(cmds[i])
 	}
 	writeJSON(w, http.StatusOK, cmds)
 }
@@ -465,7 +523,81 @@ func (s *Server) getCommand(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, cmd)
+	writeJSON(w, http.StatusOK, s.hideCommand(cmd))
+}
+
+func (s *Server) hideCommand(cmd store.Command) store.Command {
+	cmd.CommandID = s.hide(cmd.CommandID)
+	cmd.ApprovalID = s.hide(cmd.ApprovalID)
+	cmd.Canonical = s.hideJSON(cmd.Canonical)
+	cmd.Result = s.hideJSON(cmd.Result)
+	return cmd
+}
+
+func (s *Server) hideJSON(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return raw
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var parsed any
+	if err := dec.Decode(&parsed); err != nil {
+		encoded, merr := json.Marshal(s.hide(string(trimmed)))
+		if merr != nil {
+			return raw
+		}
+		return encoded
+	}
+	redacted := s.hideAny(parsed)
+	out, err := json.Marshal(redacted)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func (s *Server) hideAny(v any) any {
+	switch x := v.(type) {
+	case string:
+		return s.hide(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, item := range x {
+			out[i] = s.hideAny(item)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			if isSecretFieldName(k) {
+				if str, ok := val.(string); ok {
+					if str != "" {
+						out[k] = "[redacted]"
+					} else {
+						out[k] = ""
+					}
+					continue
+				}
+			}
+			out[k] = s.hideAny(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func isSecretFieldName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "api_key", "apikey", "secret", "client_secret", "private_key",
+		"password", "passwd", "token", "access_token", "refresh_token",
+		"id_token", "auth_token", "bearer", "authorization", "credential",
+		"x-api-key", "x_api_key":
+		return true
+	default:
+		return false
+	}
 }
 
 type approvalRequest struct {

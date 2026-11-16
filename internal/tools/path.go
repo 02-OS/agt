@@ -29,6 +29,27 @@ func SafeRel(p string) (string, error) {
 	return filepath.FromSlash(clean), nil
 }
 
+// CanonicalRepo returns the cleaned absolute directory with symlinks resolved.
+// The path must already exist and be a directory.
+func CanonicalRepo(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("repo_path is required")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("repo_path is not a directory")
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
 // Within resolves rel inside root and refuses symlink escapes.
 func Within(root, rel string) (string, error) {
 	rel, err := SafeRel(rel)

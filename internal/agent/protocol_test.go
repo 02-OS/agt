@@ -239,7 +239,8 @@ func TestClaudeMissingResultVersionAndCancellation(t *testing.T) {
 
 func TestClaudeGrepAndOffsetStayInsideAskPolicy(t *testing.T) {
 	s := mustStream(t, ProtocolClaude)
-	fixture := `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_grep","name":"Grep","input":{"pattern":"charge"}},{"type":"tool_use","id":"toolu_path","name":"Grep","input":{"pattern":"charge","path":"payments"}},{"type":"tool_use","id":"toolu_off","name":"Read","input":{"file_path":"payments/processor.py","offset":10,"limit":5}}]}}
+	fixture := `{"type":"system","subtype":"init","claude_code_version":"2.2.0","session_id":"sess_ext","protocol":"claude-stream-json/1"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_grep","name":"Grep","input":{"pattern":"charge"}},{"type":"tool_use","id":"toolu_path","name":"Grep","input":{"pattern":"charge","path":"payments","glob":"*.py"}},{"type":"tool_use","id":"toolu_glob","name":"Glob","input":{"pattern":"*.py","path":"payments"}},{"type":"tool_use","id":"toolu_off","name":"Read","input":{"file_path":"payments/processor.py","offset":10,"limit":5}},{"type":"tool_use","id":"toolu_bad_range","name":"Read","input":{"file_path":"payments/processor.py","offset":1,"limit":9999}},{"type":"tool_use","id":"toolu_secret_grep","name":"Grep","input":{"pattern":"KEY","path":".env"}},{"type":"tool_use","id":"toolu_escape_glob","name":"Glob","input":{"pattern":"*.py","path":"../outside"}}]}}
 {"type":"result","subtype":"success","result":"searched"}
 `
 	if err := s.Push([]byte(fixture)); err != nil {
@@ -255,14 +256,21 @@ func TestClaudeGrepAndOffsetStayInsideAskPolicy(t *testing.T) {
 		}
 		byID[tool.CallID] = tool
 	}
-	if byID["toolu_grep"].Decision != string(policy.Allow) || byID["toolu_grep"].AGTTool != "search_code" || !byID["toolu_grep"].Mediated {
-		t.Fatalf("grep %+v", byID["toolu_grep"])
+	for _, allowedID := range []string{"toolu_grep", "toolu_path", "toolu_glob"} {
+		if byID[allowedID].Decision != string(policy.Allow) || byID[allowedID].AGTTool != "search_code" || !byID[allowedID].Mediated {
+			t.Fatalf("%s = %+v", allowedID, byID[allowedID])
+		}
 	}
-	if byID["toolu_path"].Mediated || byID["toolu_path"].Decision != string(policy.Deny) {
-		t.Fatalf("scoped grep %+v", byID["toolu_path"])
+	if byID["toolu_off"].Decision != string(policy.Allow) || byID["toolu_off"].AGTTool != "read_file_range" || !byID["toolu_off"].Mediated {
+		t.Fatalf("offset read %+v", byID["toolu_off"])
 	}
-	if byID["toolu_off"].Mediated || byID["toolu_off"].Decision != string(policy.Deny) {
-		t.Fatalf("offset %+v", byID["toolu_off"])
+	if !strings.Contains(string(byID["toolu_off"].AGTArgs), `"start":10`) || !strings.Contains(string(byID["toolu_off"].AGTArgs), `"end":14`) {
+		t.Fatalf("unexpected read args %s", byID["toolu_off"].AGTArgs)
+	}
+	for _, deniedID := range []string{"toolu_bad_range", "toolu_secret_grep", "toolu_escape_glob"} {
+		if !byID[deniedID].Mediated || byID[deniedID].Decision != string(policy.Deny) {
+			t.Fatalf("%s should be mediated deny, got %+v", deniedID, byID[deniedID])
+		}
 	}
 }
 

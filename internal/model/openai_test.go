@@ -366,3 +366,44 @@ func TestOpenAICancelDoesNotRetry(t *testing.T) {
 		t.Fatalf("cancelled request was sent %d times", calls)
 	}
 }
+
+func TestCapabilityRejectedUsesStructuredJSONFields(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{
+			name: "structured unsupported param stream_options",
+			raw:  `{"error":{"message":"Unsupported value","param":"stream_options","code":"unsupported_parameter"}}`,
+			want: true,
+		},
+		{
+			name: "structured unsupported param max_tokens",
+			raw:  `{"error":{"message":"max_tokens is deprecated","param":"max_tokens","code":"invalid_request_error"}}`,
+			want: true,
+		},
+		{
+			name: "structured streaming unsupported",
+			raw:  `{"error":{"message":"streaming not supported","param":"stream","code":"invalid_request_error"}}`,
+			want: true,
+		},
+		{
+			name: "unrelated error mentioning stream or tool choice text",
+			raw:  `{"error":{"message":"downstream upstream proxy timeout while reading stream","code":"timeout"}}`,
+			want: false,
+		},
+		{
+			name: "non json body rejected as false",
+			raw:  `not json mentioning tools and stream`,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := capabilityRejected([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("capabilityRejected(%s) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}

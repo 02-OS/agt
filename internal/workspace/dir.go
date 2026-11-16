@@ -1,11 +1,13 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -68,9 +70,23 @@ func (d *Dir) Calls() []string {
 	return out
 }
 
+// ScopedSearcher is optionally implemented by workspaces that support path/glob filtering.
+type ScopedSearcher interface {
+	SearchFiltered(ctx context.Context, query, path, glob string) (string, int, error)
+}
+
 func (d *Dir) Search(_ context.Context, query string) (string, int, error) {
 	d.note("search_code")
 	out, err := tools.Search(d.Work, query)
+	if err != nil {
+		return err.Error(), 2, nil
+	}
+	return out, 0, nil
+}
+
+func (d *Dir) SearchFiltered(_ context.Context, query, path, glob string) (string, int, error) {
+	d.note("search_code")
+	out, err := tools.SearchFiltered(d.Work, query, path, glob)
 	if err != nil {
 		return err.Error(), 2, nil
 	}
@@ -178,14 +194,25 @@ func (d *Dir) Close(ctx context.Context) error {
 // Larger files fail the copy instead of being dropped silently.
 const MaxCopyFileBytes = 8 << 20
 
+const (
+	BackendCopy        = "copy"
+	BackendGitWorktree = "git-worktree"
+)
+
 // Materialize copies the working tree, including uncommitted files, into
-// dataDir/runs/<id>/{work,base}. It does not create a Git worktree: a checkout
-// would drop uncommitted files, and the fixtures are not Git repositories.
-// The source tree is not modified. .git is not copied. Symlinks are refused.
-// Executable bits are preserved. Dotfiles are included except the directory
-// names reported by tools.SkipDir and secret names such as .env, .ssh, and
-// private keys. .env.example is copied.
+// dataDir/runs/<id>/{work,base}. It copies repo into base once and clones/reflinks
+// base into work. When AGT_WORKSPACE_BACKEND=git-worktree is set on a Git
+// repository, it uses a detached git worktree plus dirty-overlay snapshot.
+// The source tree is not modified. .git and .02agent are not copied. Symlinks
+// are refused. Executable bits are preserved.
 func Materialize(repo, dataDir, runID string) (work, base string, err error) {
+	backend := strings.TrimSpace(os.Getenv("AGT_WORKSPACE_BACKEND"))
+	return MaterializeWithBackend(repo, dataDir, runID, backend)
+}
+
+// MaterializeWithBackend materializes a run workspace using the named backend
+// ("copy" / "" or "git-worktree").
+func MaterializeWithBackend(repo, dataDir, runID, backend string) (work, base string, err error) {
 	if err := Overlap(repo, dataDir); err != nil {
 		return "", "", err
 	}
@@ -195,13 +222,208 @@ func Materialize(repo, dataDir, runID string) (work, base string, err error) {
 	}
 	work = filepath.Join(root, "work")
 	base = filepath.Join(root, "base")
-	if err := copyTree(repo, work); err != nil {
-		return "", "", err
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case BackendGitWorktree:
+		ok, err := materializeGitWorktree(repo, base)
+		if err != nil {
+			return "", "", err
+		}
+		if !ok {
+			if err := copyTree(repo, base); err != nil {
+				return "", "", err
+			}
+		}
+	case "", BackendCopy, "reflink", "auto":
+		if err := copyTree(repo, base); err != nil {
+			return "", "", err
+		}
+	default:
+		return "", "", fmt.Errorf("unknown workspace backend %q", backend)
 	}
-	if err := copyTree(repo, base); err != nil {
+	if err := cloneTree(base, work); err != nil {
 		return "", "", err
 	}
 	return work, base, nil
+}
+
+func cloneTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("clone escapes source")
+		}
+		target := filepath.Join(dst, rel)
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to clone symlink %s", rel)
+		}
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return cloneFile(path, target, info.Mode())
+	})
+}
+
+func cloneFile(src, dst string, mode os.FileMode) error {
+	if tryReflink(src, dst, mode) {
+		return nil
+	}
+	return copyFile(src, dst, mode)
+}
+
+func materializeGitWorktree(repo, base string) (bool, error) {
+	if _, ok := gitDir(repo); !ok {
+		return false, nil
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return false, nil
+	}
+	// Check HEAD exists before adding worktree; empty repos fall back to copyTree.
+	headCheck := exec.Command("git", "-C", repo, "rev-parse", "--verify", "HEAD")
+	if err := headCheck.Run(); err != nil {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(base), 0o755); err != nil {
+		return false, err
+	}
+	addCmd := exec.Command("git", "-C", repo, "worktree", "add", "--detach", "--force", base, "HEAD")
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		_ = os.RemoveAll(base)
+		_ = exec.Command("git", "-C", repo, "worktree", "prune").Run()
+		return false, fmt.Errorf("git worktree add: %w: %s", err, bytes.TrimSpace(out))
+	}
+	defer func() {
+		_ = os.RemoveAll(filepath.Join(base, ".git"))
+		_ = exec.Command("git", "-C", repo, "worktree", "prune").Run()
+	}()
+	_ = os.RemoveAll(filepath.Join(base, ".git"))
+
+	if err := scrubTree(base); err != nil {
+		return false, err
+	}
+	if err := overlayDirtyGit(repo, base); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func scrubTree(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to copy symlink %s", rel)
+		}
+		if d.IsDir() {
+			if tools.SkipDir(d.Name()) || tools.SecretDir(d.Name()) {
+				if rerr := os.RemoveAll(path); rerr != nil {
+					return rerr
+				}
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() || tools.SecretFile(d.Name()) {
+			return os.Remove(path)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() > MaxCopyFileBytes {
+			return fmt.Errorf("file %s is %d bytes, over the %d byte copy limit", rel, info.Size(), MaxCopyFileBytes)
+		}
+		return nil
+	})
+}
+
+func overlayDirtyGit(repo, base string) error {
+	statusCmd := exec.Command("git", "-C", repo, "status", "--porcelain", "-z", "-uall", "--no-renames")
+	out, err := statusCmd.Output()
+	if err != nil {
+		return fmt.Errorf("git status: %w", err)
+	}
+	for _, rec := range bytes.Split(out, []byte{0}) {
+		if len(rec) < 4 {
+			continue
+		}
+		x, y := rec[0], rec[1]
+		relSlash := string(rec[3:])
+		safe, err := tools.SafeRel(relSlash)
+		if err != nil {
+			continue
+		}
+		if skipRelPath(filepath.ToSlash(safe)) {
+			continue
+		}
+		src := filepath.Join(repo, safe)
+		dst := filepath.Join(base, safe)
+		if x == 'D' || y == 'D' {
+			if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			continue
+		}
+		info, err := os.Lstat(src)
+		if err != nil {
+			if os.IsNotExist(err) {
+				_ = os.Remove(dst)
+				continue
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to copy symlink %s", safe)
+		}
+		if info.IsDir() {
+			if err := copyTree(src, dst); err != nil {
+				return err
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() || tools.SecretFile(info.Name()) {
+			continue
+		}
+		if info.Size() > MaxCopyFileBytes {
+			return fmt.Errorf("file %s is %d bytes, over the %d byte copy limit", safe, info.Size(), MaxCopyFileBytes)
+		}
+		if err := copyFile(src, dst, info.Mode()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func skipRelPath(slash string) bool {
+	for _, part := range strings.Split(slash, "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		if tools.SkipDir(part) || tools.SecretDir(part) {
+			return true
+		}
+	}
+	return false
 }
 
 func copyTree(src, dst string) error {

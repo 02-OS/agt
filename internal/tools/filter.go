@@ -4,6 +4,7 @@ package tools
 // configuration such as .github and .gitignore is not in this set.
 // The names match anywhere in the tree, not only at the repository root.
 var excludedDirs = map[string]struct{}{
+	".02agent":      {},
 	".git":          {},
 	".gradle":       {},
 	".mypy_cache":   {},

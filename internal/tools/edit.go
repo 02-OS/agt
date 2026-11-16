@@ -167,6 +167,9 @@ func readRegular(full string) ([]byte, os.FileInfo, error) {
 	if !info.Mode().IsRegular() {
 		return nil, nil, fmt.Errorf("refusing to edit a non-regular file")
 	}
+	if info.Size() > MaxWriteBytes {
+		return nil, nil, fmt.Errorf("file exceeds %d byte edit limit", MaxWriteBytes)
+	}
 	data, err := os.ReadFile(full)
 	if err != nil {
 		return nil, nil, err

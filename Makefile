@@ -3,6 +3,7 @@ export AGT_DATABASE_URL := postgres://agt:agt@127.0.0.1:54329/agt?sslmode=disabl
 export AGT_IMAGE_PYTHON := agt-sandbox:python
 export AGT_IMAGE_GO := agt-sandbox:go
 export AGT_IMAGE_NODE := agt-sandbox:node
+export AGT_IMAGE_RUST := agt-sandbox:rust
 export AGT_SANDBOX_IMAGE := $(AGT_IMAGE_PYTHON)
 export AGT_LISTEN := 127.0.0.1:8787
 
@@ -34,6 +35,7 @@ image:
 	docker build -t $(AGT_IMAGE_PYTHON) -f deploy/python.Dockerfile deploy
 	docker build -t $(AGT_IMAGE_GO) -f deploy/go.Dockerfile deploy
 	docker build -t $(AGT_IMAGE_NODE) -f deploy/node.Dockerfile deploy
+	docker build -t $(AGT_IMAGE_RUST) -f deploy/rust.Dockerfile deploy
 
 # test is the integration job. It starts Postgres, builds the three images,
 # and fails when Docker, an image, or Postgres is missing. AGT_INTEGRATION=1
@@ -49,7 +51,7 @@ test: up image
 # that this Makefile exports. The sandbox package then skips
 # TestSandboxRunsTestsAndStaysClosed. That skip is not container support.
 unit:
-	env -u AGT_INTEGRATION -u AGT_DATABASE_URL -u AGT_IMAGE_PYTHON -u AGT_IMAGE_GO -u AGT_IMAGE_NODE -u AGT_SANDBOX_IMAGE \
+	env -u AGT_INTEGRATION -u AGT_DATABASE_URL -u AGT_IMAGE_PYTHON -u AGT_IMAGE_GO -u AGT_IMAGE_NODE -u AGT_IMAGE_RUST -u AGT_SANDBOX_IMAGE \
 		go test $(UNIT_PKGS)
 
 package:

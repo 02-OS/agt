@@ -24,7 +24,7 @@ func Definitions() []any {
 	str := map[string]any{"type": "string"}
 	num := map[string]any{"type": "integer"}
 	return []any{
-		fn("search_code", "Search the repository for a literal string.", object(map[string]any{"query": str}, []string{"query"})),
+		fn("search_code", "Search the repository for a literal string.", object(map[string]any{"query": str, "path": str, "glob": str}, []string{"query"})),
 		fn("read_file_range", "Read an inclusive 1-based line range from one file.", object(map[string]any{"path": str, "start": num, "end": num}, []string{"path", "start", "end"})),
 		fn("git_diff", "Show the uncommitted diff in the run worktree.", object(map[string]any{}, nil)),
 		fn("run_test", "Run the user-selected test command inside the sandbox. The command is fixed for the run.", object(map[string]any{}, nil)),

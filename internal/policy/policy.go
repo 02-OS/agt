@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/csy20/agt/internal/tools"
@@ -94,9 +96,37 @@ func Decide(tool string, raw json.RawMessage) (Result, error) {
 		if err := decode(raw, &args); err != nil {
 			return denied(tool, raw, "invalid arguments"), nil
 		}
-		if strings.TrimSpace(args.Query) == "" || len(args.Query) > 200 {
+		if (strings.TrimSpace(args.Query) == "" && strings.TrimSpace(args.Glob) == "") || len(args.Query) > 200 || len(args.Glob) > 200 {
 			body, _ := json.Marshal(args)
 			return denied(tool, body, "query must be 1..200 characters"), nil
+		}
+		if strings.TrimSpace(args.Path) != "" {
+			if strings.TrimSpace(args.Path) == "." {
+				args.Path = ""
+			} else {
+				rel, err := tools.SafeRel(args.Path)
+				if err != nil {
+					body, _ := json.Marshal(args)
+					return denied(tool, body, err.Error()), nil
+				}
+				args.Path = filepath.ToSlash(rel)
+				if tools.SecretRel(rel) {
+					body, _ := json.Marshal(args)
+					return denied(tool, body, "secret paths are not available to the agent"), nil
+				}
+			}
+		}
+		if strings.TrimSpace(args.Glob) != "" {
+			glob := strings.ReplaceAll(strings.TrimSpace(args.Glob), "\\", "/")
+			if strings.ContainsAny(glob, "\x00:") || strings.HasPrefix(glob, "/") || strings.Contains(glob, "..") || tools.SecretRel(glob) {
+				body, _ := json.Marshal(args)
+				return denied(tool, body, "invalid glob"), nil
+			}
+			if _, err := path.Match(strings.TrimPrefix(glob, "**/"), "sample"); err != nil {
+				body, _ := json.Marshal(args)
+				return denied(tool, body, "invalid glob"), nil
+			}
+			args.Glob = glob
 		}
 		body, err := json.Marshal(args)
 		if err != nil {
@@ -113,6 +143,7 @@ func Decide(tool string, raw json.RawMessage) (Result, error) {
 			body, _ := json.Marshal(args)
 			return denied(tool, body, err.Error()), nil
 		}
+		args.Path = filepath.ToSlash(rel)
 		if tools.SecretRel(rel) {
 			body, _ := json.Marshal(args)
 			return denied(tool, body, "secret paths are not available to the agent"), nil
@@ -150,6 +181,7 @@ func Decide(tool string, raw json.RawMessage) (Result, error) {
 			full, _ := json.Marshal(args)
 			return denied(tool, full, err.Error()), nil
 		}
+		args.Path = filepath.ToSlash(rel)
 		if tools.SecretRel(rel) {
 			full, _ := json.Marshal(args)
 			return denied(tool, full, "secret paths are not available to the agent"), nil
@@ -176,6 +208,7 @@ func Decide(tool string, raw json.RawMessage) (Result, error) {
 			body, _ := json.Marshal(write)
 			return denied(tool, body, err.Error()), nil
 		}
+		write.Path = filepath.ToSlash(rel)
 		if tools.SecretRel(rel) {
 			body, _ := json.Marshal(write)
 			return denied(tool, body, "secret paths are not available to the agent"), nil
@@ -206,6 +239,7 @@ func Decide(tool string, raw json.RawMessage) (Result, error) {
 			body, _ := json.Marshal(del)
 			return denied(tool, body, err.Error()), nil
 		}
+		del.Path = filepath.ToSlash(rel)
 		if tools.SecretRel(rel) {
 			body, _ := json.Marshal(del)
 			return denied(tool, body, "secret paths are not available to the agent"), nil

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/csy20/agt/internal/profile"
 )
@@ -16,6 +17,7 @@ type Config struct {
 	ImagePython      string
 	ImageGo          string
 	ImageNode        string
+	ImageRust        string
 	DataDir          string
 	Provider         string
 	ModelBaseURL     string
@@ -24,6 +26,7 @@ type Config struct {
 	InputPerMillion  int64
 	OutputPerMillion int64
 	OTLPEndpoint     string
+	RetentionTTL     time.Duration
 	Models           Catalog
 }
 
@@ -39,6 +42,12 @@ func Load() Config {
 	if sandbox == "" {
 		sandbox = python
 	}
+	var retention time.Duration
+	if raw := os.Getenv("AGT_RETENTION_TTL"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			retention = d
+		}
+	}
 	cfg := Config{
 		ListenAddr:       env("AGT_LISTEN", "127.0.0.1:8787"),
 		DatabaseURL:      env("AGT_DATABASE_URL", "postgres://agt:agt@127.0.0.1:54329/agt?sslmode=disable"),
@@ -46,6 +55,7 @@ func Load() Config {
 		ImagePython:      python,
 		ImageGo:          env("AGT_IMAGE_GO", "agt-sandbox:go"),
 		ImageNode:        env("AGT_IMAGE_NODE", "agt-sandbox:node"),
+		ImageRust:        env("AGT_IMAGE_RUST", "agt-sandbox:rust"),
 		DataDir:          CurrentPlaces().Data,
 		Provider:         env("AGT_PROVIDER", "fake"),
 		ModelBaseURL:     env("AGT_MODEL_BASE_URL", "https://api.openai.com/v1"),
@@ -54,6 +64,7 @@ func Load() Config {
 		InputPerMillion:  dollarsPerMillion("AGT_INPUT_USD_PER_M", 0.10),
 		OutputPerMillion: dollarsPerMillion("AGT_OUTPUT_USD_PER_M", 0.50),
 		OTLPEndpoint:     os.Getenv("AGT_OTLP_ENDPOINT"),
+		RetentionTTL:     retention,
 	}
 	cfg.Models = LoadModels()
 	return cfg
@@ -78,7 +89,11 @@ func (c Config) ProfileImages() profile.Images {
 	if node == "" {
 		node = "agt-sandbox:node"
 	}
-	return profile.Images{Python: python, Go: goImage, Node: node}
+	rust := c.ImageRust
+	if rust == "" {
+		rust = "agt-sandbox:rust"
+	}
+	return profile.Images{Python: python, Go: goImage, Node: node, Rust: rust}
 }
 
 func env(key, fallback string) string {

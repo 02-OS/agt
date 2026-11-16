@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/csy20/agt/internal/config"
@@ -362,7 +363,8 @@ func readEventStream(ctx context.Context, base, runID string, last *int64, jsonO
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("events: %s", strings.TrimSpace(string(body)))
 	}
-	body := &idleReader{rc: resp.Body, idle: streamIdle}
+	body := newIdleReader(resp.Body, streamIdle)
+	defer body.Close()
 	err = readSSE(body, func(seq int64, event string, data []byte) {
 		if seq > 0 && seq <= *last {
 			return
@@ -380,28 +382,102 @@ func readEventStream(ctx context.Context, base, runID string, last *int64, jsonO
 
 var streamHTTP = &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 10 * time.Second}}
 
+type readChunk struct {
+	data []byte
+	err  error
+}
+
 type idleReader struct {
-	rc   io.ReadCloser
-	idle time.Duration
+	rc        io.ReadCloser
+	idle      time.Duration
+	ch        chan readChunk
+	done      chan struct{}
+	closeOnce sync.Once
+	buf       []byte
+	eofErr    error
+}
+
+func newIdleReader(rc io.ReadCloser, idle time.Duration) *idleReader {
+	r := &idleReader{
+		rc:   rc,
+		idle: idle,
+		ch:   make(chan readChunk, 8),
+		done: make(chan struct{}),
+	}
+	go r.pump()
+	return r
+}
+
+func (b *idleReader) pump() {
+	defer close(b.ch)
+	tmp := make([]byte, 32*1024)
+	for {
+		n, err := b.rc.Read(tmp)
+		var cp []byte
+		if n > 0 {
+			cp = make([]byte, n)
+			copy(cp, tmp[:n])
+		}
+		if n > 0 || err != nil {
+			select {
+			case b.ch <- readChunk{data: cp, err: err}:
+			case <-b.done:
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (b *idleReader) Close() error {
+	var err error
+	b.closeOnce.Do(func() {
+		close(b.done)
+		err = b.rc.Close()
+	})
+	return err
 }
 
 func (b *idleReader) Read(p []byte) (int, error) {
-	type result struct {
-		n   int
-		err error
+	if len(b.buf) > 0 {
+		n := copy(p, b.buf)
+		b.buf = b.buf[n:]
+		if len(b.buf) == 0 && b.eofErr != nil {
+			err := b.eofErr
+			b.eofErr = nil
+			return n, err
+		}
+		return n, nil
 	}
-	ch := make(chan result, 1)
-	go func() {
-		n, err := b.rc.Read(p)
-		ch <- result{n, err}
-	}()
+	if b.eofErr != nil {
+		err := b.eofErr
+		b.eofErr = nil
+		return 0, err
+	}
 	timer := time.NewTimer(b.idle)
 	defer timer.Stop()
 	select {
-	case res := <-ch:
-		return res.n, res.err
+	case chunk, ok := <-b.ch:
+		if !ok {
+			return 0, io.EOF
+		}
+		if len(chunk.data) > 0 {
+			n := copy(p, chunk.data)
+			if n < len(chunk.data) {
+				b.buf = append(b.buf[:0], chunk.data[n:]...)
+				b.eofErr = chunk.err
+				return n, nil
+			}
+			return n, chunk.err
+		}
+		if chunk.err != nil {
+			return 0, chunk.err
+		}
+		return 0, nil
 	case <-timer.C:
-		_ = b.rc.Close()
+		_ = b.Close()
 		return 0, errStreamIdle
 	}
 }

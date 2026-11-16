@@ -205,7 +205,7 @@ func TestModelSelectionSurvivesDaemonRestart(t *testing.T) {
 func buildBin(t *testing.T, root, dir, name, pkg string) string {
 	t.Helper()
 	out := filepath.Join(dir, name)
-	cmd := exec.Command("go", "build", "-o", out, pkg)
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, pkg)
 	cmd.Dir = root
 	buf, err := cmd.CombinedOutput()
 	if err != nil {

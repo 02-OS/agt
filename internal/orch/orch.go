@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/csy20/agt/internal/audit"
 	"github.com/csy20/agt/internal/id"
 	"github.com/csy20/agt/internal/model"
 	"github.com/csy20/agt/internal/patch"
@@ -59,8 +60,25 @@ type Options struct {
 	NewWorkspace func(store.Run) (workspace.Handle, error)
 	Hooks        Hooks
 	Tel          telemetry.Emitter
+	Metrics      *telemetry.Metrics
 	// Policy, when set, may only tighten an allow. Nil keeps Decide.
 	Policy *policy.File
+}
+
+type runMsgCache struct {
+	lastSeq int64
+	turns   []model.Turn
+}
+
+type runObsCache struct {
+	lastUpdated time.Time
+	seen        map[string]struct{}
+	obs         []model.Observation
+}
+
+type runCallCache struct {
+	lastSeq int64
+	calls   int
 }
 
 type Orchestrator struct {
@@ -71,17 +89,25 @@ type Orchestrator struct {
 	newWorkspace func(store.Run) (workspace.Handle, error)
 	hooks        Hooks
 	tel          telemetry.Emitter
+	metrics      *telemetry.Metrics
 	policy       *policy.File
 
-	mu   sync.Mutex
-	open map[string]workspace.Handle
-	mark map[string]int64
+	mu        sync.Mutex
+	open      map[string]workspace.Handle
+	mark      map[string]int64
+	msgCache  map[string]*runMsgCache
+	obsCache  map[string]*runObsCache
+	callCache map[string]*runCallCache
 }
 
 func New(opts Options) *Orchestrator {
 	tel := opts.Tel
 	if tel == nil {
 		tel = telemetry.Discard{}
+	}
+	metrics := opts.Metrics
+	if metrics == nil {
+		metrics = telemetry.NewMetrics()
 	}
 	return &Orchestrator{
 		store:        opts.Store,
@@ -91,21 +117,40 @@ func New(opts Options) *Orchestrator {
 		newWorkspace: opts.NewWorkspace,
 		hooks:        opts.Hooks,
 		tel:          tel,
+		metrics:      metrics,
 		policy:       opts.Policy,
 		open:         map[string]workspace.Handle{},
 		mark:         map[string]int64{},
+		msgCache:     map[string]*runMsgCache{},
+		obsCache:     map[string]*runObsCache{},
+		callCache:    map[string]*runCallCache{},
 	}
+}
+
+func runLoopLimit(maxSteps int) int {
+	if maxSteps <= 0 {
+		return 64
+	}
+	n := maxSteps*4 + 16
+	if n < 64 {
+		return 64
+	}
+	return n
 }
 
 // Run advances one run until it stops, succeeds, or the worker is interrupted.
 func (o *Orchestrator) Run(ctx context.Context, runID string) error {
-	for i := 0; i < 64; i++ {
+	limit := 64
+	for i := 0; i < limit; i++ {
 		if err := ctx.Err(); err != nil {
 			return o.onStop(ctx, runID, err)
 		}
 		current, err := o.store.GetRun(ctx, runID)
 		if err != nil {
 			return err
+		}
+		if want := runLoopLimit(current.MaxSteps); want > limit {
+			limit = want
 		}
 		o.flush(ctx, current)
 		if run.IsTerminal(current.State) {
@@ -178,7 +223,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, current store.Run) error {
 }
 
 func stepContext(parent context.Context, current store.Run) (context.Context, context.CancelFunc) {
-	if current.Deadline.IsZero() || !time.Now().Before(current.Deadline) {
+	if current.Deadline.IsZero() {
 		return parent, func() {}
 	}
 	return context.WithDeadline(parent, current.Deadline)
@@ -287,7 +332,7 @@ func (o *Orchestrator) modelTurn(ctx context.Context, current store.Run) error {
 	if err != nil {
 		return err
 	}
-	completed, err := o.store.CountEvents(ctx, current.ID, "model.called")
+	completed, err := o.completedCalls(ctx, current.ID)
 	if err != nil {
 		return err
 	}
@@ -314,6 +359,7 @@ func (o *Orchestrator) modelTurn(ctx context.Context, current store.Run) error {
 	}
 	cost := usage.CostMicros(int64(resp.InputTokens), prices.InputPerMillion) +
 		usage.CostMicros(int64(resp.OutputTokens), prices.OutputPerMillion)
+	o.metrics.AddCostMicros(cost)
 	intent := store.Intent{
 		Plan:         resp.Plan,
 		Text:         resp.Text,
@@ -440,7 +486,9 @@ func (o *Orchestrator) executeOpen(ctx context.Context, current store.Run) error
 	if cmd.State == "awaiting_approval" {
 		return ErrHalt
 	}
+	started := time.Now()
 	output, code, err := o.perform(ctx, current, cmd)
+	o.metrics.ObserveTool(cmd.Tool, time.Since(started))
 	if errors.Is(err, ErrInterrupt) {
 		return err
 	}
@@ -499,6 +547,11 @@ func (o *Orchestrator) perform(ctx context.Context, current store.Run, cmd store
 		var args tools.SearchArgs
 		if err := json.Unmarshal(cmd.Canonical, &args); err != nil {
 			return err.Error(), 2, nil
+		}
+		if args.Path != "" || args.Glob != "" {
+			if ss, ok := ws.(workspace.ScopedSearcher); ok {
+				return ss.SearchFiltered(ctx, args.Query, args.Path, args.Glob)
+			}
 		}
 		return ws.Search(ctx, args.Query)
 	case "read_file_range":
@@ -721,28 +774,84 @@ func (o *Orchestrator) workspace(ctx context.Context, current store.Run) (worksp
 	return ws, nil
 }
 
+func (o *Orchestrator) completedCalls(ctx context.Context, runID string) (int, error) {
+	o.mu.Lock()
+	cache, ok := o.callCache[runID]
+	if !ok {
+		cache = &runCallCache{}
+		o.callCache[runID] = cache
+	}
+	after := cache.lastSeq
+	count := cache.calls
+	o.mu.Unlock()
+
+	events, err := o.store.EventsAfter(ctx, runID, after)
+	if err != nil {
+		return 0, err
+	}
+	for _, ev := range events {
+		if ev.Type == "model.called" {
+			count++
+		}
+		if ev.Seq > after {
+			after = ev.Seq
+		}
+	}
+	o.mu.Lock()
+	if cur, ok := o.callCache[runID]; ok {
+		if after > cur.lastSeq {
+			cur.lastSeq = after
+			cur.calls = count
+		}
+		count = cur.calls
+	}
+	o.mu.Unlock()
+	return count, nil
+}
+
 func (o *Orchestrator) observations(ctx context.Context, runID string) ([]model.Observation, error) {
-	cmds, err := o.store.ListCommands(ctx, runID)
+	o.mu.Lock()
+	cache, ok := o.obsCache[runID]
+	if !ok {
+		cache = &runObsCache{seen: map[string]struct{}{}}
+		o.obsCache[runID] = cache
+	}
+	since := cache.lastUpdated
+	o.mu.Unlock()
+
+	cmds, err := o.store.ListTerminalCommandsAfter(ctx, runID, since)
 	if err != nil {
 		return nil, err
 	}
-	var out []model.Observation
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	cache, ok = o.obsCache[runID]
+	if !ok {
+		cache = &runObsCache{seen: map[string]struct{}{}}
+		o.obsCache[runID] = cache
+	}
 	for _, cmd := range cmds {
-		if cmd.State != "succeeded" && cmd.State != "failed" && cmd.State != "denied" {
+		if cmd.UpdatedAt.After(cache.lastUpdated) {
+			cache.lastUpdated = cmd.UpdatedAt
+		}
+		if _, exists := cache.seen[cmd.CommandID]; exists {
 			continue
 		}
+		cache.seen[cmd.CommandID] = struct{}{}
 		var result struct {
 			ExitCode int    `json:"exit_code"`
 			Output   string `json:"output"`
 		}
 		_ = json.Unmarshal(cmd.Result, &result)
-		out = append(out, model.Observation{
+		cache.obs = append(cache.obs, model.Observation{
 			Tool:   cmd.Tool,
 			Origin: "tool:" + cmd.Tool,
 			Exit:   result.ExitCode,
 			Output: modelText(result.Output, 4000),
 		})
 	}
+	out := make([]model.Observation, len(cache.obs))
+	copy(out, cache.obs)
 	return out, nil
 }
 
@@ -790,6 +899,9 @@ func (o *Orchestrator) close(ctx context.Context, runID string) error {
 	o.mu.Lock()
 	ws := o.open[runID]
 	delete(o.open, runID)
+	delete(o.msgCache, runID)
+	delete(o.obsCache, runID)
+	delete(o.callCache, runID)
 	o.mu.Unlock()
 	if ws == nil {
 		return nil
@@ -805,14 +917,56 @@ func (o *Orchestrator) flush(ctx context.Context, current store.Run) {
 	if err != nil {
 		return
 	}
+	auditPath := ""
+	if o.dataDir != "" {
+		auditPath = filepath.Join(o.dataDir, "audit.jsonl")
+	}
 	for _, ev := range events {
 		o.tel.Emit(ctx, telemetry.Event{
-			TraceID: current.TraceID,
-			RunID:   current.ID,
-			Name:    ev.Type,
-			Seq:     ev.Seq,
-			Attrs:   map[string]string{"actor": ev.ActorType},
+			TraceID:   current.TraceID,
+			RunID:     current.ID,
+			Name:      ev.Type,
+			Seq:       ev.Seq,
+			StartTime: ev.CreatedAt,
+			EndTime:   ev.CreatedAt,
+			Attrs:     map[string]string{"actor": ev.ActorType},
 		})
+		switch ev.Type {
+		case "state.changed":
+			var p struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+			}
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				o.metrics.RecordTransition(p.From, p.To)
+				if auditPath != "" {
+					_ = audit.Append(auditPath, audit.Event{
+						Time:  ev.CreatedAt.UTC().Format(time.RFC3339Nano),
+						Kind:  "state",
+						RunID: current.ID,
+						State: p.To,
+					})
+				}
+			}
+		case "policy.decided":
+			if auditPath != "" {
+				var p struct {
+					Tool     string `json:"tool"`
+					ArgsHash string `json:"args_hash"`
+					Decision string `json:"decision"`
+				}
+				if json.Unmarshal(ev.Payload, &p) == nil {
+					_ = audit.Append(auditPath, audit.Event{
+						Time:     ev.CreatedAt.UTC().Format(time.RFC3339Nano),
+						Kind:     "decision",
+						RunID:    current.ID,
+						Tool:     p.Tool,
+						ArgsHash: p.ArgsHash,
+						Decision: p.Decision,
+					})
+				}
+			}
+		}
 		last = ev.Seq
 	}
 	o.mu.Lock()
@@ -905,17 +1059,39 @@ func (o *Orchestrator) recordSessionResult(ctx context.Context, runID string) {
 }
 
 func (o *Orchestrator) requestTurns(ctx context.Context, current store.Run) ([]model.Turn, error) {
-	msgs, err := o.store.ListMessages(ctx, current.ID)
+	o.mu.Lock()
+	cache, ok := o.msgCache[current.ID]
+	if !ok {
+		cache = &runMsgCache{}
+		o.msgCache[current.ID] = cache
+	}
+	after := cache.lastSeq
+	o.mu.Unlock()
+
+	msgs, err := o.store.ListMessagesAfter(ctx, current.ID, after)
 	if err != nil {
 		return nil, err
 	}
-	turns := make([]model.Turn, 0, len(msgs))
+	o.mu.Lock()
+	cache, ok = o.msgCache[current.ID]
+	if !ok {
+		cache = &runMsgCache{}
+		o.msgCache[current.ID] = cache
+	}
 	for _, msg := range msgs {
-		turns = append(turns, model.Turn{
+		if msg.Seq <= cache.lastSeq {
+			continue
+		}
+		cache.turns = append(cache.turns, model.Turn{
 			Seq: msg.Seq, Role: msg.Role, Content: msg.Content,
 			ToolCallID: msg.ToolCallID, ToolName: msg.ToolName, Arguments: msg.Arguments,
 		})
+		cache.lastSeq = msg.Seq
 	}
+	turns := make([]model.Turn, len(cache.turns))
+	copy(turns, cache.turns)
+	o.mu.Unlock()
+
 	fitted := model.Fit(turns, model.RequestTokenBudget)
 	if len(current.Plan) > 0 && string(current.Plan) != "null" {
 		fitted = append(fitted, model.Turn{Role: "user", Content: "DATA origin=plan\n" + string(current.Plan)})

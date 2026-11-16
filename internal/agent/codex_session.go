@@ -522,7 +522,7 @@ func startAppServer(ctx context.Context, base, extra []string) (*appSession, err
 func (s *appSession) close() {
 	s.once.Do(func() {
 		_ = s.stdin.Close()
-		if s.cmd.Process != nil {
+		if s.cmd != nil && s.cmd.Process != nil {
 			killGroup(s.cmd.Process.Pid)
 			_ = s.cmd.Process.Kill()
 		}
@@ -606,6 +606,12 @@ func (s *appSession) call(ctx context.Context, method string, params any) (json.
 	s.kinds[key] = method
 	s.sent = append(s.sent, method)
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.pending, key)
+		delete(s.kinds, key)
+		s.mu.Unlock()
+	}()
 	if err := s.write(map[string]any{"method": method, "id": id, "params": params}); err != nil {
 		return nil, err
 	}
@@ -1231,33 +1237,46 @@ func (s *appSession) networkProbe(ctx context.Context, work string) (bool, error
 		_ = tcp.SetDeadline(time.Now().Add(12 * time.Second))
 	}
 	go func() {
-		conn, acceptErr := ln.Accept()
-		if acceptErr != nil {
-			return
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+			buf := make([]byte, 2048)
+			_, _ = conn.Read(buf)
+			body := codexNetCanary + "\n"
+			_, _ = fmt.Fprintf(conn, "HTTP/1.0 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+			_ = conn.Close()
 		}
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-		buf := make([]byte, 2048)
-		_, _ = conn.Read(buf)
-		body := codexNetCanary + "\n"
-		_, _ = fmt.Fprintf(conn, "HTTP/1.0 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
 	}()
 	addr, ok := ln.Addr().(*net.TCPAddr)
 	if !ok {
 		return false, fmt.Errorf("%w: network preflight listener has no port", ErrBoundary)
 	}
-	script := fmt.Sprintf("import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:%d', timeout=3).read().decode())", addr.Port)
-	code, stdout, stderr, err := s.execProfile(ctx, work, []string{"python3", "-c", script})
-	if err != nil {
-		return false, err
+	probeURL := fmt.Sprintf("http://127.0.0.1:%d", addr.Port)
+	probes := [][]string{
+		{"python3", "-c", fmt.Sprintf("import urllib.request; print(urllib.request.urlopen(%q, timeout=3).read().decode())", probeURL)},
+		{"curl", "-fsS", "--max-time", "3", probeURL},
+		{"wget", "-qO-", "-T", "3", probeURL},
+		{"node", "-e", fmt.Sprintf("fetch(%q).then(r=>r.text()).then(t=>console.log(t))", probeURL)},
+		{"bash", "-c", fmt.Sprintf("exec 3<>/dev/tcp/127.0.0.1/%d && printf 'GET / HTTP/1.0\\r\\n\\r\\n' >&3 && cat <&3", addr.Port)},
+		{"sh", "-c", fmt.Sprintf("printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 127.0.0.1 %d", addr.Port)},
 	}
-	if strings.Contains(stdout, codexNetCanary) || strings.Contains(stderr, codexNetCanary) {
-		return true, nil
+	for _, argv := range probes {
+		code, stdout, stderr, err := s.execProfile(ctx, work, argv)
+		if err != nil {
+			return false, err
+		}
+		if strings.Contains(stdout, codexNetCanary) || strings.Contains(stderr, codexNetCanary) {
+			return true, nil
+		}
+		if code != 0 && interpreterMissing(stderr) {
+			continue
+		}
+		return false, nil
 	}
-	if code != 0 && interpreterMissing(stderr) {
-		return false, fmt.Errorf("%w: python3 was not available for the network preflight; turn/start was not sent", ErrBoundary)
-	}
-	return false, nil
+	return false, fmt.Errorf("%w: no HTTP/TCP probe binary (python3/curl/wget/node/bash/sh) was available for the network preflight; turn/start was not sent", ErrBoundary)
 }
 
 func interpreterMissing(stderr string) bool {

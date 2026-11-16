@@ -99,7 +99,7 @@ func liveDoctor() doctorFns {
 func makeDoctorReport(cfg config.Config, base string, fns func() doctorFns) doctorReport {
 	places := config.CurrentPlaces()
 	probe := fns()
-	images := []string{cfg.ImagePython, cfg.ImageGo, cfg.ImageNode}
+	images := []string{cfg.ImagePython, cfg.ImageGo, cfg.ImageNode, cfg.ImageRust}
 	checks := []doctorCheck{
 		probe.listen(cfg.ListenAddr),
 		probe.model(cfg),

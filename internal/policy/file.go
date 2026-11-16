@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/csy20/agt/internal/tools"
@@ -102,7 +103,7 @@ func ParseFile(body []byte) (File, error) {
 		}
 		seen[tool] = true
 	}
-	for _, rule := range file.Rules {
+	for i, rule := range file.Rules {
 		if !token(rule.Tool) {
 			return File{}, fmt.Errorf("policy rule tool is invalid")
 		}
@@ -114,9 +115,11 @@ func ParseFile(body []byte) (File, error) {
 			return File{}, fmt.Errorf("policy rule decision must be deny or require_approval")
 		}
 		if rule.PathPrefix != "" {
-			if _, err := tools.SafeRel(rule.PathPrefix); err != nil {
+			rel, err := tools.SafeRel(rule.PathPrefix)
+			if err != nil {
 				return File{}, fmt.Errorf("policy path: %w", err)
 			}
+			file.Rules[i].PathPrefix = filepath.ToSlash(rel)
 		}
 	}
 	return file, nil
@@ -233,12 +236,27 @@ func (rule Rule) matches(result Result) bool {
 	if rule.PathPrefix == "" {
 		return true
 	}
-	path := canonicalPath(result.Canonical)
-	if path == rule.PathPrefix {
-		return true
+	prefix := normalizePolicyPath(rule.PathPrefix)
+	if prefix == "" {
+		return false
 	}
-	prefix := strings.TrimSuffix(rule.PathPrefix, "/")
-	return prefix != "" && strings.HasPrefix(path, prefix+"/")
+	path := normalizePolicyPath(canonicalPath(result.Canonical))
+	if path == "" {
+		return false
+	}
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
+}
+
+func normalizePolicyPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	rel, err := tools.SafeRel(p)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
 }
 
 func stricter(next, current Decision) bool {

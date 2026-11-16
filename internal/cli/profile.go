@@ -34,7 +34,7 @@ type profileFlags struct {
 
 func addProfileFlags(fs *flag.FlagSet) profileFlags {
 	var p profileFlags
-	p.profile = fs.String("profile", "", "python, go, javascript, or typescript")
+	p.profile = fs.String("profile", "", "python, go, javascript, typescript, or rust")
 	p.workdir = fs.String("workdir", ".", "repository-relative working directory")
 	p.memory = fs.String("memory", "256m", "container memory: 64m, 128m, 256m, or 512m")
 	p.timeout = fs.Int("timeout", 60, "test timeout in seconds, from 1 to 300")

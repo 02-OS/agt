@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -122,6 +123,12 @@ func (r *Runner) Exec(ctx context.Context, worktree, runID string, spec ExecSpec
 	if err == nil {
 		return stdout.String(), stderr.String(), 0, nil
 	}
+	if ctx.Err() != nil {
+		killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.Destroy(killCtx, runID)
+		return stdout.String(), stderr.String(), 0, ctx.Err()
+	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
 		return stdout.String(), stderr.String(), exit.ExitCode(), nil
@@ -160,12 +167,29 @@ func (r *Runner) ensure(ctx context.Context, worktree, runID string, spec ExecSp
 	if err != nil {
 		return r.start(ctx, name, worktree, runID, spec)
 	}
+	labels, missing, err := inspectLabels(ctx, name)
+	if err != nil {
+		return err
+	}
+	if missing {
+		return r.start(ctx, name, worktree, runID, spec)
+	}
+	if !Owns(r.namespace(), labels, runID) {
+		return fmt.Errorf("refusing to reuse container %s: namespace or run does not match", name)
+	}
 	got, err := inspectImage(ctx, name)
 	if err != nil {
 		return err
 	}
 	if got != spec.Image {
 		return fmt.Errorf("run container image %q does not match profile image %q", got, spec.Image)
+	}
+	mountSrc, err := inspectWorkspaceMount(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !sameMountSource(mountSrc, worktree) {
+		return fmt.Errorf("run container %s /workspace mount %q does not match %q", name, mountSrc, worktree)
 	}
 	if status != "running" {
 		cmd := dockerCommand(ctx, "start", name)
@@ -175,6 +199,44 @@ func (r *Runner) ensure(ctx context.Context, worktree, runID string, spec ExecSp
 		}
 	}
 	return nil
+}
+
+func inspectWorkspaceMount(ctx context.Context, name string) (string, error) {
+	cmd := dockerCommand(ctx, "inspect", "--format", "{{json .Mounts}}", name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("docker inspect mounts: %w: %s", err, bytes.TrimSpace(out))
+	}
+	var mounts []struct {
+		Type        string `json:"Type"`
+		Source      string `json:"Source"`
+		Destination string `json:"Destination"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out), &mounts); err != nil {
+		return "", fmt.Errorf("docker inspect mounts: %w", err)
+	}
+	for _, m := range mounts {
+		if m.Destination == "/workspace" && m.Type == "bind" {
+			return m.Source, nil
+		}
+	}
+	return "", fmt.Errorf("run container %s has no /workspace bind mount", name)
+}
+
+func sameMountSource(got, want string) bool {
+	return samePath(canonicalMountPath(got), canonicalMountPath(want))
+}
+
+func canonicalMountPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	abs = filepath.Clean(abs)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return abs
 }
 
 func (r *Runner) start(ctx context.Context, name, worktree, runID string, spec ExecSpec) error {

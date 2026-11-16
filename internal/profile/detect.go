@@ -19,7 +19,7 @@ type Suggestion struct {
 // the tree is ambiguous or unmarked. It does not read repository config as
 // authority and does not follow secret directories.
 func Propose(root string) Suggestion {
-	var goMod, pkgJSON, python bool
+	var goMod, pkgJSON, python, cargo bool
 	pythonWhy := ""
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -43,6 +43,8 @@ func Propose(root string) Suggestion {
 			goMod = true
 		case "package.json":
 			pkgJSON = true
+		case "Cargo.toml":
+			cargo = true
 		case "pyproject.toml", "requirements.txt", "setup.py":
 			python = true
 			pythonWhy = name
@@ -69,21 +71,26 @@ func Propose(root string) Suggestion {
 	if python {
 		matched++
 	}
+	if cargo {
+		matched++
+	}
 	switch {
 	case matched == 0:
-		return Suggestion{Reason: "no Python, Go, or JavaScript project marker"}
+		return Suggestion{Reason: "no Python, Go, JavaScript, or Rust project marker"}
 	case matched > 1:
-		return Suggestion{Reason: fmt.Sprintf("multiple languages match (%s); choose --profile explicitly", markers(goMod, pkgJSON, python))}
+		return Suggestion{Reason: fmt.Sprintf("multiple languages match (%s); choose --profile explicitly", markers(goMod, pkgJSON, python, cargo))}
 	case goMod:
 		return Suggestion{Name: NameGo, Reason: "found go.mod"}
 	case pkgJSON:
 		return Suggestion{Name: NameJavaScript, Reason: "found package.json"}
+	case cargo:
+		return Suggestion{Name: NameRust, Reason: "found Cargo.toml"}
 	default:
 		return Suggestion{Name: NamePython, Reason: "found " + pythonWhy}
 	}
 }
 
-func markers(goMod, pkgJSON, python bool) string {
+func markers(goMod, pkgJSON, python, cargo bool) string {
 	var parts []string
 	if goMod {
 		parts = append(parts, "go.mod")
@@ -93,6 +100,9 @@ func markers(goMod, pkgJSON, python bool) string {
 	}
 	if python {
 		parts = append(parts, "Python")
+	}
+	if cargo {
+		parts = append(parts, "Cargo.toml")
 	}
 	out := ""
 	for i, part := range parts {
