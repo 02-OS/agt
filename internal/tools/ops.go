@@ -72,7 +72,7 @@ func SearchFiltered(root, query, relPath, glob string) (string, error) {
 			return nil
 		}
 		if query == "" {
-			fmt.Fprintf(&b, "%s\n", rel)
+			fmt.Fprintf(&b, "%s\n", slashRel)
 			n++
 			if n >= 50 {
 				return fs.SkipAll
@@ -98,7 +98,7 @@ func SearchFiltered(root, query, relPath, glob string) (string, error) {
 			lineNo++
 			line := sc.Text()
 			if strings.Contains(line, query) {
-				fmt.Fprintf(&b, "%s:%d:%s\n", rel, lineNo, clip(line, 200))
+				fmt.Fprintf(&b, "%s:%d:%s\n", slashRel, lineNo, clip(line, 200))
 				n++
 				if n >= 50 {
 					return fs.SkipAll

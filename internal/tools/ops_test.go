@@ -180,7 +180,8 @@ func TestSearchSkipsBinaryOversizeAndFiltersPathGlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "pkg/a.go:2:") || !strings.Contains(out, "pkg/long.go:1:") {
+	norm := filepath.ToSlash(out)
+	if !strings.Contains(norm, "pkg/a.go:2:") || !strings.Contains(norm, "pkg/long.go:1:") {
 		t.Fatalf("missing expected matches in %q", out)
 	}
 	if strings.Contains(out, "b.txt") || strings.Contains(out, "bin.dat") || strings.Contains(out, "huge.go") {
