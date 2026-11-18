@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -96,11 +97,23 @@ func Build(base, work string, meta Meta) (Artifact, error) {
 		after, hasAfter := workInv[path]
 		switch {
 		case hasAfter && !hasBefore:
-			files = append(files, fileRecord(OpAdd, path, fileInfo{}, after))
+			rec, err := fileRecord(work, OpAdd, path, fileInfo{}, after)
+			if err != nil {
+				return Artifact{}, err
+			}
+			files = append(files, rec)
 		case hasBefore && !hasAfter:
-			files = append(files, fileRecord(OpDelete, path, before, fileInfo{}))
+			rec, err := fileRecord(work, OpDelete, path, before, fileInfo{})
+			if err != nil {
+				return Artifact{}, err
+			}
+			files = append(files, rec)
 		case before.sum != after.sum || before.mode != after.mode:
-			files = append(files, fileRecord(OpModify, path, before, after))
+			rec, err := fileRecord(work, OpModify, path, before, after)
+			if err != nil {
+				return Artifact{}, err
+			}
+			files = append(files, rec)
 		}
 	}
 	art := Artifact{
@@ -130,7 +143,7 @@ func Digest(art Artifact) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func fileRecord(op, path string, before, after fileInfo) File {
+func fileRecord(work, op, path string, before, after fileInfo) (File, error) {
 	f := File{
 		Op:           op,
 		Path:         path,
@@ -140,15 +153,22 @@ func fileRecord(op, path string, before, after fileInfo) File {
 		AfterSHA256:  after.sum,
 	}
 	if op != OpDelete {
-		f.ContentBase64 = base64.StdEncoding.EncodeToString(after.data)
+		raw, err := os.ReadFile(filepath.Join(work, filepath.FromSlash(path)))
+		if err != nil {
+			return File{}, err
+		}
+		if hashBytes(raw) != after.sum {
+			return File{}, fmt.Errorf("file %s changed while building patch", path)
+		}
+		f.ContentBase64 = base64.StdEncoding.EncodeToString(raw)
 	}
-	return f
+	return f, nil
 }
 
 type fileInfo struct {
 	mode string
 	sum  string
-	data []byte
+	size int64
 }
 
 func inventory(root string) (map[string]fileInfo, error) {
@@ -160,6 +180,7 @@ func inventory(root string) (map[string]fileInfo, error) {
 		return nil, fmt.Errorf("%s is not a directory", root)
 	}
 	out := map[string]fileInfo{}
+	buf := make([]byte, 32*1024)
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -195,17 +216,30 @@ func inventory(root string) (map[string]fileInfo, error) {
 		if st.Size() > toolsMaxFile {
 			return fmt.Errorf("file %s is %d bytes, over the %d byte patch limit", slash, st.Size(), toolsMaxFile)
 		}
-		body, err := os.ReadFile(path)
+		sum, err := hashFile(path, buf)
 		if err != nil {
 			return err
 		}
-		out[slash] = fileInfo{mode: formatMode(st.Mode()), sum: hashBytes(body), data: body}
+		out[slash] = fileInfo{mode: formatMode(st.Mode()), sum: sum, size: st.Size()}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+func hashFile(path string, buf []byte) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func digestBase(inv map[string]fileInfo) string {

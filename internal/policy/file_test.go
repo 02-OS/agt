@@ -134,6 +134,23 @@ func TestEmptyPolicyFileChangesNothing(t *testing.T) {
 	}
 }
 
+func TestPolicyFileNormalizesPrefixAndCanonicalPath(t *testing.T) {
+	file, err := ParseFile([]byte(`{"version":"policy.file.v1","rules":[{"tool":"write_file","path_prefix":"./payments/","decision":"deny"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Rules[0].PathPrefix != "payments" {
+		t.Fatalf("normalized prefix = %q", file.Rules[0].PathPrefix)
+	}
+	got, err := DecideWithFile("write_file", json.RawMessage(`{"path":"./payments/../payments/processor.py","content":"x","before_sha256":""}`), &file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Decision != Deny || !strings.Contains(got.Reason, "tightened") {
+		t.Fatalf("normalized rule did not match: %+v", got)
+	}
+}
+
 func mustDecide(t *testing.T, tool, raw string) Result {
 	t.Helper()
 	result, err := Decide(tool, json.RawMessage(raw))

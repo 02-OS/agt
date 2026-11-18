@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -14,11 +15,14 @@ import (
 
 // Event is one exported span. The database event log remains the audit source.
 type Event struct {
-	TraceID string
-	RunID   string
-	Name    string
-	Seq     int64
-	Attrs   map[string]string
+	TraceID   string
+	RunID     string
+	Name      string
+	Seq       int64
+	StartTime time.Time
+	EndTime   time.Time
+	Status    string
+	Attrs     map[string]string
 }
 
 type Emitter interface {
@@ -45,22 +49,61 @@ func (m Multi) Emit(ctx context.Context, ev Event) {
 
 // OTLP posts a minimal OTLP/HTTP JSON span. Export failure does not fail the run.
 type OTLP struct {
-	Endpoint string
-	Client   *http.Client
+	Endpoint    string
+	Headers     map[string]string
+	ServiceName string
+	Client      *http.Client
 }
 
+// New builds a telemetry Emitter using endpoint (or standard OTLP env vars when empty).
 func New(endpoint string) Emitter {
-	if strings.TrimSpace(endpoint) == "" {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+	}
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	}
+	if endpoint == "" {
 		return Log{}
 	}
-	return Multi{Log{}, &OTLP{Endpoint: endpoint, Client: &http.Client{Timeout: 2 * time.Second}}}
+	svc := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME"))
+	if svc == "" {
+		svc = "agtd"
+	}
+	return Multi{Log{}, &OTLP{
+		Endpoint:    endpoint,
+		Headers:     parseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")),
+		ServiceName: svc,
+		Client:      &http.Client{Timeout: 2 * time.Second},
+	}}
+}
+
+func parseHeaders(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, part := range strings.Split(raw, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k != "" {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 func (o *OTLP) Emit(ctx context.Context, ev Event) {
 	if o == nil || o.Endpoint == "" || ev.TraceID == "" {
 		return
 	}
-	body := payload(ev)
+	body := o.payload(ev)
 	endpoint := strings.TrimRight(o.Endpoint, "/")
 	if !strings.HasSuffix(endpoint, "/v1/traces") {
 		endpoint += "/v1/traces"
@@ -70,6 +113,9 @@ func (o *OTLP) Emit(ctx context.Context, ev Event) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range o.Headers {
+		req.Header.Set(k, v)
+	}
 	client := o.Client
 	if client == nil {
 		client = http.DefaultClient
@@ -82,7 +128,7 @@ func (o *OTLP) Emit(ctx context.Context, ev Event) {
 	resp.Body.Close()
 }
 
-func payload(ev Event) []byte {
+func (o *OTLP) payload(ev Event) []byte {
 	attrs := []map[string]any{
 		{"key": "run_id", "value": map[string]any{"stringValue": ev.RunID}},
 		{"key": "event_name", "value": map[string]any{"stringValue": ev.Name}},
@@ -93,26 +139,47 @@ func payload(ev Event) []byte {
 			"value": map[string]any{"stringValue": value},
 		})
 	}
-	now := strconv.FormatInt(time.Now().UnixNano(), 10)
-	spanID := fmt.Sprintf("%016x", uint64(ev.Seq))
+	end := ev.EndTime
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	start := ev.StartTime
+	if start.IsZero() {
+		start = end
+	}
+	seq := ev.Seq
+	if seq <= 0 {
+		seq = 1
+	}
+	spanID := fmt.Sprintf("%016x", uint64(seq))
+	svc := o.ServiceName
+	if svc == "" {
+		svc = "agtd"
+	}
+	span := map[string]any{
+		"traceId":           ev.TraceID,
+		"spanId":            spanID,
+		"name":              ev.Name,
+		"kind":              1,
+		"startTimeUnixNano": strconv.FormatInt(start.UnixNano(), 10),
+		"endTimeUnixNano":   strconv.FormatInt(end.UnixNano(), 10),
+		"attributes":        attrs,
+	}
+	if ev.Status == "error" {
+		span["status"] = map[string]any{"code": 2}
+	} else if ev.Status == "ok" {
+		span["status"] = map[string]any{"code": 1}
+	}
 	doc := map[string]any{
 		"resourceSpans": []any{map[string]any{
 			"resource": map[string]any{
 				"attributes": []any{
-					map[string]any{"key": "service.name", "value": map[string]any{"stringValue": "agtd"}},
+					map[string]any{"key": "service.name", "value": map[string]any{"stringValue": svc}},
 				},
 			},
 			"scopeSpans": []any{map[string]any{
 				"scope": map[string]any{"name": "agt"},
-				"spans": []any{map[string]any{
-					"traceId":           ev.TraceID,
-					"spanId":            spanID,
-					"name":              ev.Name,
-					"kind":              1,
-					"startTimeUnixNano": now,
-					"endTimeUnixNano":   now,
-					"attributes":        attrs,
-				}},
+				"spans": []any{span},
 			}},
 		}},
 	}

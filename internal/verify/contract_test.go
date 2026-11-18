@@ -133,3 +133,41 @@ func TestDecisionsStayDistinct(t *testing.T) {
 		t.Fatalf("checks failed %+v", final)
 	}
 }
+
+func TestProtectsNormalizesRelativePaths(t *testing.T) {
+	c, _, _, err := Parse([]byte(featureRaw()), TaskFeature, "python")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Protects("./tests/test_accept.py") || !c.Protects("tests/../tests/test_regress.py") {
+		t.Fatal("normalized protected check paths did not match")
+	}
+}
+
+func TestClassifyGoNodeAndCargoOutputs(t *testing.T) {
+	cases := []struct {
+		name string
+		code int
+		out  string
+		want string
+	}{
+		{name: "go ok", code: 0, out: "ok  \tgithub.com/example/pkg\t0.123s\n", want: KindPass},
+		{name: "go empty", code: 0, out: "?   \tgithub.com/example/empty\t[no test files]\n", want: KindInfrastructure},
+		{name: "go fail", code: 1, out: "--- FAIL: TestAdd (0.00s)\nFAIL\tgithub.com/example/pkg\t0.012s\n", want: KindFail},
+		{name: "node pass", code: 0, out: "# tests 3\n# pass 3\n# fail 0\n", want: KindPass},
+		{name: "node spec pass", code: 0, out: "ℹ tests 2\nℹ pass 2\nℹ fail 0\n", want: KindPass},
+		{name: "node zero tests", code: 0, out: "# tests 0\n# pass 0\n# fail 0\n", want: KindInfrastructure},
+		{name: "node fail", code: 1, out: "# tests 3\n# pass 2\n# fail 1\n", want: KindFail},
+		{name: "cargo pass", code: 0, out: "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n", want: KindPass},
+		{name: "cargo zero", code: 0, out: "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n", want: KindInfrastructure},
+		{name: "cargo fail", code: 101, out: "test result: FAILED. 3 passed; 1 failed; 0 ignored\n", want: KindFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, reason := Classify(tc.code, tc.out, nil)
+			if kind != tc.want {
+				t.Fatalf("got kind=%q (%s), want %q", kind, reason, tc.want)
+			}
+		})
+	}
+}

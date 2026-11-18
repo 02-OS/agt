@@ -19,9 +19,13 @@ type TranscriptMessage struct {
 }
 
 func (s *Store) ListMessages(ctx context.Context, runID string) ([]TranscriptMessage, error) {
+	return s.ListMessagesAfter(ctx, runID, 0)
+}
+
+func (s *Store) ListMessagesAfter(ctx context.Context, runID string, afterSeq int64) ([]TranscriptMessage, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT seq, contract, role, content, tool_call_id, tool_name, arguments
-		FROM model_messages WHERE run_id=$1 ORDER BY seq ASC`, runID)
+		FROM model_messages WHERE run_id=$1 AND seq>$2 ORDER BY seq ASC`, runID, afterSeq)
 	if err != nil {
 		return nil, err
 	}

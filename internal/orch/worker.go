@@ -3,6 +3,7 @@ package orch
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/csy20/agt/internal/id"
@@ -44,13 +45,19 @@ func (w *Worker) Loop(ctx context.Context) {
 	}
 }
 
+func (w *Worker) releaseJob(job store.Job, reason string) {
+	if err := w.Store.ReleaseJob(context.Background(), job.ID, w.ID, job.Fence); err != nil && !errors.Is(err, store.ErrConflict) && !errors.Is(err, store.ErrNotFound) {
+		slog.Error("release job failed", "reason", reason, "job_id", job.ID, "run_id", job.RunID, "worker_id", w.ID, "fence", job.Fence, "err", err)
+	}
+}
+
 // drive owns one claimed job. A pause finishes the job. A lost lease does not
 // release it, because another worker may already hold the new fence. An
 // interrupt or a process signal requeues only while this fence is still ours.
 func (w *Worker) drive(parent context.Context, job store.Job) {
 	for attempt := 0; attempt < 8; attempt++ {
 		if parent.Err() != nil {
-			_ = w.Store.ReleaseJob(context.Background(), job.ID, w.ID, job.Fence)
+			w.releaseJob(job, "parent_canceled")
 			return
 		}
 		runCtx, cancel := context.WithCancelCause(parent)
@@ -64,7 +71,7 @@ func (w *Worker) drive(parent context.Context, job store.Job) {
 		}
 		paused := errors.Is(err, ErrPaused) || errors.Is(context.Cause(runCtx), ErrPaused)
 		if err != nil && !paused {
-			_ = w.Store.ReleaseJob(context.Background(), job.ID, w.ID, job.Fence)
+			w.releaseJob(job, "run_error")
 			return
 		}
 		finished, ferr := w.Store.FinishIfQuiescent(context.Background(), job.ID, w.ID, job.Fence)
@@ -72,7 +79,8 @@ func (w *Worker) drive(parent context.Context, job store.Job) {
 			return
 		}
 		if ferr != nil {
-			_ = w.Store.ReleaseJob(context.Background(), job.ID, w.ID, job.Fence)
+			slog.Warn("finish_if_quiescent failed", "job_id", job.ID, "run_id", job.RunID, "worker_id", w.ID, "err", ferr)
+			w.releaseJob(job, "finish_error")
 			return
 		}
 		if finished {
@@ -80,7 +88,8 @@ func (w *Worker) drive(parent context.Context, job store.Job) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	_ = w.Store.ReleaseJob(context.Background(), job.ID, w.ID, job.Fence)
+	slog.Warn("worker drive exhausted quiescence checks; releasing job", "job_id", job.ID, "run_id", job.RunID, "worker_id", w.ID, "attempts", 8)
+	w.releaseJob(job, "quiescence_exhausted")
 }
 
 func (w *Worker) watch(ctx context.Context, cancel context.CancelCauseFunc, job store.Job, done chan struct{}) {

@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -78,13 +79,42 @@ func unionFiles(base, work string) ([]string, error) {
 
 func diffRel(base, work, rel string) (string, error) {
 	label := repoLabel(rel)
-	oldData, oldExists, err := readDiffSide(filepath.Join(base, rel), label)
+	oldPath := filepath.Join(base, rel)
+	newPath := filepath.Join(work, rel)
+	oldSt, oldExists, err := statDiffSide(oldPath, label)
 	if err != nil {
 		return "", err
 	}
-	newData, newExists, err := readDiffSide(filepath.Join(work, rel), label)
+	newSt, newExists, err := statDiffSide(newPath, label)
 	if err != nil {
 		return "", err
+	}
+	if oldExists && newExists {
+		if os.SameFile(oldSt, newSt) {
+			return "", nil
+		}
+		if oldSt.Size() == newSt.Size() {
+			same, err := filesEqual(oldPath, newPath, label)
+			if err != nil {
+				return "", err
+			}
+			if same {
+				return "", nil
+			}
+		}
+	}
+	var oldData, newData []byte
+	if oldExists {
+		oldData, _, err = readDiffSide(oldPath, label)
+		if err != nil {
+			return "", err
+		}
+	}
+	if newExists {
+		newData, _, err = readDiffSide(newPath, label)
+		if err != nil {
+			return "", err
+		}
 	}
 	if oldExists && newExists && bytes.Equal(oldData, newData) {
 		return "", nil
@@ -106,6 +136,50 @@ func diffRel(base, work, rel string) (string, error) {
 		return "", fmt.Errorf("diff: %s has %d/%d lines, over the %d line limit", label, len(oldText.lines), len(newText.lines), maxDiffLines)
 	}
 	return unified(oldLabel, newLabel, oldText, newText), nil
+}
+
+func statDiffSide(path, label string) (os.FileInfo, bool, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("diff: stat %s: %w", label, err)
+	}
+	return st, true, nil
+}
+
+func filesEqual(aPath, bPath, label string) (bool, error) {
+	fa, err := os.Open(aPath)
+	if err != nil {
+		return false, fmt.Errorf("diff: read %s: %w", label, err)
+	}
+	defer fa.Close()
+	fb, err := os.Open(bPath)
+	if err != nil {
+		return false, fmt.Errorf("diff: read %s: %w", label, err)
+	}
+	defer fb.Close()
+	var bufA [32 * 1024]byte
+	var bufB [32 * 1024]byte
+	for {
+		na, erra := io.ReadFull(fa, bufA[:])
+		nb, errb := io.ReadFull(fb, bufB[:])
+		if na != nb || !bytes.Equal(bufA[:na], bufB[:nb]) {
+			return false, nil
+		}
+		eofA := erra == io.EOF || erra == io.ErrUnexpectedEOF
+		eofB := errb == io.EOF || errb == io.ErrUnexpectedEOF
+		if erra != nil && !eofA {
+			return false, fmt.Errorf("diff: read %s: %w", label, erra)
+		}
+		if errb != nil && !eofB {
+			return false, fmt.Errorf("diff: read %s: %w", label, errb)
+		}
+		if eofA || eofB {
+			return eofA && eofB, nil
+		}
+	}
 }
 
 func readDiffSide(path, label string) ([]byte, bool, error) {

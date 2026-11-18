@@ -32,7 +32,9 @@ func dockerProcessEnv() []string {
 	return out
 }
 
-func dockerCommand(ctx context.Context, args ...string) *exec.Cmd {
+var dockerCommand = defaultDockerCommand
+
+func defaultDockerCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = dockerProcessEnv()
 	return cmd

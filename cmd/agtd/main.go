@@ -122,9 +122,12 @@ func run() int {
 			return current.State, true, nil
 		}
 	}
+	metrics := telemetry.NewMetrics()
 	sweepCtx, cancelSweep := context.WithTimeout(ctx, 20*time.Second)
-	if _, err := runner.Sweep(sweepCtx, lookup(sweepCtx)); err != nil {
+	if removed, err := runner.Sweep(sweepCtx, lookup(sweepCtx)); err != nil {
 		slog.Warn("sandbox sweep", "err", err)
+	} else {
+		metrics.AddSandboxCleanups(removed)
 	}
 	cancelSweep()
 	engine := orch.New(orch.Options{
@@ -134,8 +137,9 @@ func run() int {
 			InputPerMillion:  cfg.InputPerMillion,
 			OutputPerMillion: cfg.OutputPerMillion,
 		},
-		Tel:    telemetry.New(cfg.OTLPEndpoint),
-		Policy: pol,
+		Tel:     telemetry.New(cfg.OTLPEndpoint),
+		Metrics: metrics,
+		Policy:  pol,
 		ModelFor: func(current store.Run) (model.Provider, error) {
 			return orch.ProviderFor(current, cfg)
 		},
@@ -160,9 +164,17 @@ func run() int {
 	})
 	worker := &orch.Worker{Store: st, Run: engine.Run}
 	go worker.Loop(ctx)
+	if cfg.RetentionTTL > 0 {
+		go retentionLoop(ctx, st, cfg.DataDir, cfg.RetentionTTL)
+	}
 	srv := api.New(st, cfg, token)
+	srv.Metrics = metrics
+	srv.VerifyExec = runner.RunProfile
+	srv.VerifyCleanup = runner.Destroy
 	srv.Cleanup = func(c context.Context) (int, error) {
-		return runner.Sweep(c, lookup(c))
+		removed, err := runner.Sweep(c, lookup(c))
+		metrics.AddSandboxCleanups(removed)
+		return removed, err
 	}
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
@@ -199,5 +211,31 @@ func writeDaemonMarks(cfg config.Config) func() {
 	return func() {
 		_ = os.Remove(pidPath)
 		_ = os.Remove(addrPath)
+	}
+}
+
+func retentionLoop(ctx context.Context, st *store.Store, dataDir string, ttl time.Duration) {
+	interval := ttl / 2
+	if interval > time.Hour {
+		interval = time.Hour
+	}
+	if interval < 10*time.Second {
+		interval = 10 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if report, err := api.PruneExpiredRuns(runCtx, st, dataDir, ttl, false); err != nil {
+				slog.Warn("retention prune", "err", err)
+			} else if report.Removed > 0 {
+				slog.Info("retention pruned", "removed", report.Removed, "bytes_freed", report.BytesFreed)
+			}
+			cancel()
+		}
 	}
 }

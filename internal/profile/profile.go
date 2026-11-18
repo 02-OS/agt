@@ -21,6 +21,7 @@ const (
 	NameGo         = "go"
 	NameJavaScript = "javascript"
 	NameTypeScript = "typescript"
+	NameRust       = "rust"
 )
 
 // Request is the user-selected profile. It has no image, environment, or
@@ -77,6 +78,7 @@ type Images struct {
 	Python string
 	Go     string
 	Node   string
+	Rust   string
 }
 
 func (m Images) For(name string) (string, error) {
@@ -88,6 +90,8 @@ func (m Images) For(name string) (string, error) {
 		image = m.Go
 	case NameJavaScript:
 		image = m.Node
+	case NameRust:
+		image = m.Rust
 	default:
 		return "", fmt.Errorf("unknown profile %q", name)
 	}
@@ -100,7 +104,7 @@ func (m Images) For(name string) (string, error) {
 // List returns the configured image tags in a stable order.
 func (m Images) List() []string {
 	var out []string
-	for _, image := range []string{m.Python, m.Go, m.Node} {
+	for _, image := range []string{m.Python, m.Go, m.Node, m.Rust} {
 		if strings.TrimSpace(image) != "" {
 			out = append(out, image)
 		}
@@ -255,7 +259,7 @@ func (p Profile) Check() error {
 	if p.Contract != Contract {
 		return fmt.Errorf("profile contract must be %s", Contract)
 	}
-	if p.Name != NamePython && p.Name != NameGo && p.Name != NameJavaScript {
+	if p.Name != NamePython && p.Name != NameGo && p.Name != NameJavaScript && p.Name != NameRust {
 		return fmt.Errorf("unknown profile %q", p.Name)
 	}
 	if err := aliasOK(p.Name, p.Alias); err != nil {
@@ -333,6 +337,15 @@ func EnvFor(name string) []string {
 			"HOME=/tmp",
 			"NODE_NO_WARNINGS=1",
 		}
+	case NameRust:
+		return []string{
+			"HOME=/tmp",
+			"TMPDIR=/tmp",
+			"CARGO_HOME=/tmp/cargo",
+			"CARGO_TARGET_DIR=/tmp/target",
+			"CARGO_NET_OFFLINE=true",
+			"RUST_BACKTRACE=1",
+		}
 	default:
 		return nil
 	}
@@ -371,7 +384,7 @@ func validateRequest(req Request) error {
 
 func canonical(name string) (string, string, error) {
 	switch name {
-	case NamePython, NameGo, NameJavaScript:
+	case NamePython, NameGo, NameJavaScript, NameRust:
 		return name, "", nil
 	case NameTypeScript:
 		return NameJavaScript, NameTypeScript, nil
@@ -434,6 +447,10 @@ func validateArgv(name string, argv []string) error {
 	case NameJavaScript:
 		if bin != "node" {
 			return fmt.Errorf("javascript profile argv must start with node")
+		}
+	case NameRust:
+		if bin != "cargo" && bin != "rustc" {
+			return fmt.Errorf("rust profile argv must start with cargo or rustc")
 		}
 	default:
 		return fmt.Errorf("unknown profile %q", name)

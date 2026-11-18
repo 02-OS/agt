@@ -1,9 +1,14 @@
 #!/bin/sh
-# Build unsigned local archives under dist/. Do not publish them.
+# Build release archives under dist/.
 # linux/amd64 is executed with `agt version`. Every other target is
-# cross-compiled and is not executed. This repository has no LICENSE file.
+# cross-compiled and is not executed. Distributed under the MIT LICENSE.
 set -eu
 cd "$(dirname "$0")/.."
+
+if [ ! -f LICENSE ]; then
+	echo "LICENSE file is missing" >&2
+	exit 1
+fi
 
 ver=$(sed -n 's/^[[:space:]]*Product = "\([^"]*\)"/\1/p' internal/version/version.go)
 if [ -z "$ver" ]; then
@@ -14,9 +19,8 @@ fi
 rm -rf dist
 mkdir -p dist/stage
 note="agt ${ver}
-Unsigned local build. Not published.
-This repository has no LICENSE file and is not presented as licensed.
-Only the linux/amd64 agt binary is executed, and only to print its version.
+Licensed under the MIT License (see LICENSE).
+Only the linux/amd64 agt binary is executed during packaging, and only to print its version.
 Other archives are cross-compiled and were not executed.
 Setup, upgrade, and uninstall are in docs/beta.md of the source tree.
 This build did not call a hosted model.
@@ -29,14 +33,15 @@ build_one() {
 	stage="dist/stage/${name}"
 	mkdir -p "$stage"
 	printf '%s' "$note" >"$stage/README.txt"
+	cp LICENSE "$stage/LICENSE"
 	if [ "$goos" = "windows" ]; then
 		CGO_ENABLED=0 GOTOOLCHAIN=local GOOS="$goos" GOARCH="$goarch" go build -buildvcs=false -o "$stage/agt.exe" ./cmd/agt
 		CGO_ENABLED=0 GOTOOLCHAIN=local GOOS="$goos" GOARCH="$goarch" go build -buildvcs=false -o "$stage/agtd.exe" ./cmd/agtd
-		(cd "$stage" && zip -q "../../${name}.zip" agt.exe agtd.exe README.txt)
+		(cd "$stage" && zip -q "../../${name}.zip" agt.exe agtd.exe LICENSE README.txt)
 	else
 		CGO_ENABLED=0 GOTOOLCHAIN=local GOOS="$goos" GOARCH="$goarch" go build -buildvcs=false -o "$stage/agt" ./cmd/agt
 		CGO_ENABLED=0 GOTOOLCHAIN=local GOOS="$goos" GOARCH="$goarch" go build -buildvcs=false -o "$stage/agtd" ./cmd/agtd
-		tar -C "$stage" -czf "dist/${name}.tar.gz" agt agtd README.txt
+		tar -C "$stage" -czf "dist/${name}.tar.gz" agt agtd LICENSE README.txt
 	fi
 }
 
@@ -61,7 +66,7 @@ build_one windows amd64
 	echo "darwin/amd64: cross-compiled, not executed"
 	echo "darwin/arm64: cross-compiled, not executed"
 	echo "windows/amd64: cross-compiled, not executed"
-	echo "license: no LICENSE file in the repository; these archives are not presented as licensed"
+	echo "license: MIT (LICENSE included in each archive)"
 	echo "hosted model: not called"
 } >dist/BUILD.txt
 

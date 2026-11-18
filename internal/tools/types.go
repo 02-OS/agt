@@ -6,6 +6,8 @@ type EmptyArgs struct{}
 
 type SearchArgs struct {
 	Query string `json:"query"`
+	Path  string `json:"path,omitempty"`
+	Glob  string `json:"glob,omitempty"`
 }
 
 type ReadArgs struct {

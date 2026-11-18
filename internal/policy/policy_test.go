@@ -168,3 +168,22 @@ func TestPatchStaysInsideTree(t *testing.T) {
 		t.Fatalf("relative symlink path is denied later at the write, decision=%s reason=%s", res.Decision, res.Reason)
 	}
 }
+
+func TestCanonicalPathNormalizationMatchesCleanPaths(t *testing.T) {
+	dirtyRead, err := Decide("read_file_range", json.RawMessage(`{"path":"./payments/../payments/processor.py","start":1,"end":10}`))
+	if err != nil || dirtyRead.Decision != Allow {
+		t.Fatalf("dirty read: %+v %v", dirtyRead, err)
+	}
+	cleanRead, err := Decide("read_file_range", json.RawMessage(`{"path":"payments/processor.py","start":1,"end":10}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirtyRead.ArgsHash != cleanRead.ArgsHash || string(dirtyRead.Canonical) != string(cleanRead.Canonical) {
+		t.Fatalf("canonical read mismatch: dirty=%s (%s) clean=%s (%s)", dirtyRead.Canonical, dirtyRead.ArgsHash, cleanRead.Canonical, cleanRead.ArgsHash)
+	}
+
+	dirtyPatch, err := Decide("apply_patch", json.RawMessage(`{"path":"./payments/../payments/processor.py","old":"a","new":"b"}`))
+	if err != nil || !strings.Contains(string(dirtyPatch.Canonical), `"path":"payments/processor.py"`) {
+		t.Fatalf("dirty patch: %+v %v", dirtyPatch, err)
+	}
+}

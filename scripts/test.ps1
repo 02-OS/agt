@@ -19,6 +19,7 @@ function Clear-AgtTestEnv {
             "AGT_IMAGE_PYTHON",
             "AGT_IMAGE_GO",
             "AGT_IMAGE_NODE",
+            "AGT_IMAGE_RUST",
             "AGT_SANDBOX_IMAGE"
         )) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
@@ -55,6 +56,8 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & docker build -t agt-sandbox:node -f deploy/node.Dockerfile deploy
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& docker build -t agt-sandbox:rust -f deploy/rust.Dockerfile deploy
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $env:AGT_INTEGRATION = "1"
 # Maintenance database only. Tests create agt_test_* databases and refuse to
@@ -63,6 +66,7 @@ $env:AGT_DATABASE_URL = "postgres://agt:agt@127.0.0.1:54329/postgres?sslmode=dis
 $env:AGT_IMAGE_PYTHON = "agt-sandbox:python"
 $env:AGT_IMAGE_GO = "agt-sandbox:go"
 $env:AGT_IMAGE_NODE = "agt-sandbox:node"
+$env:AGT_IMAGE_RUST = "agt-sandbox:rust"
 $env:AGT_SANDBOX_IMAGE = "agt-sandbox:python"
 $env:AGT_LISTEN = "127.0.0.1:8787"
 & go test -timeout 20m ./...

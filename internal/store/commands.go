@@ -194,6 +194,9 @@ func (s *Store) CommitModelIntent(ctx context.Context, runID string, fromVersion
 		out, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id=$1`, runID))
 		return err
 	})
+	if err == nil {
+		s.NotifyRun(runID)
+	}
 	return out, err
 }
 
@@ -267,6 +270,26 @@ func (s *Store) ListCommands(ctx context.Context, runID string) ([]Command, erro
 	return out, rows.Err()
 }
 
+func (s *Store) ListTerminalCommandsAfter(ctx context.Context, runID string, since time.Time) ([]Command, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+commandColumns+` FROM commands
+		WHERE run_id=$1 AND state IN ('succeeded', 'failed', 'denied') AND updated_at >= $2
+		ORDER BY created_at ASC, command_id ASC`, runID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Command
+	for rows.Next() {
+		cmd, err := scanCommand(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cmd)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) FinishCommand(ctx context.Context, commandID, state string, result any) error {
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -277,8 +300,9 @@ func (s *Store) FinishCommand(ctx context.Context, commandID, state string, resu
 		Output   string `json:"output"`
 	}
 	_ = json.Unmarshal(body, &parsed)
-	return s.withTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		var runID, tool string
+	var runID string
+	err = s.withTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var tool string
 		err := tx.QueryRow(ctx, `SELECT run_id, tool FROM commands WHERE command_id=$1`, commandID).Scan(&runID, &tool)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
@@ -307,6 +331,10 @@ func (s *Store) FinishCommand(ctx context.Context, commandID, state string, resu
 		}
 		return appendToolResult(ctx, tx, runID, tool, parsed.Output, parsed.ExitCode)
 	})
+	if err == nil && runID != "" {
+		s.NotifyRun(runID)
+	}
+	return err
 }
 
 func appendAssistantMessage(ctx context.Context, tx pgx.Tx, runID string, in Intent) error {
@@ -364,7 +392,7 @@ func (s *Store) RecordSystemCommand(ctx context.Context, runID, commandID, tool,
 	if err != nil {
 		return err
 	}
-	return s.withTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+	err = s.withTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		cur, err := lockRun(ctx, tx, runID)
 		if err != nil {
 			return err
@@ -386,6 +414,10 @@ func (s *Store) RecordSystemCommand(ctx context.Context, runID, commandID, tool,
 		})
 		return err
 	})
+	if err == nil {
+		s.NotifyRun(runID)
+	}
+	return err
 }
 
 func (s *Store) Approve(ctx context.Context, in Approval) (Run, error) {
@@ -461,6 +493,9 @@ func (s *Store) Approve(ctx context.Context, in Approval) (Run, error) {
 		out, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id=$1`, in.RunID))
 		return err
 	})
+	if err == nil {
+		s.NotifyRun(in.RunID)
+	}
 	return out, err
 }
 
@@ -519,6 +554,9 @@ func (s *Store) Resume(ctx context.Context, runID string, fromVersion int64, fro
 		out, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id=$1`, runID))
 		return err
 	})
+	if err == nil {
+		s.NotifyRun(runID)
+	}
 	return out, err
 }
 

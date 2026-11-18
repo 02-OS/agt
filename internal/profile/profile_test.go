@@ -159,3 +159,25 @@ func TestProposeDoesNotAuthorize(t *testing.T) {
 		t.Fatalf("secret dir counted %+v", got)
 	}
 }
+
+func TestRustProfileAndDetection(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Cargo.toml"), []byte("[package]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := Propose(root)
+	if got.Name != NameRust {
+		t.Fatalf("expected rust detection, got %+v", got)
+	}
+	imgs := Images{Python: "p", Go: "g", Node: "n", Rust: "agt-sandbox:rust"}
+	resolved, err := Resolve(Request{Name: NameRust, Argv: []string{"cargo", "test", "--all"}}, imgs, "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Image != "agt-sandbox:rust" || resolved.Name != NameRust {
+		t.Fatalf("resolved = %+v", resolved)
+	}
+	if _, err := Resolve(Request{Name: NameRust, Argv: []string{"rm", "-rf", "/"}}, imgs, "amd64"); err == nil {
+		t.Fatal("disallowed cargo/rust argv was accepted")
+	}
+}

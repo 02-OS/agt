@@ -22,7 +22,15 @@ func HostExec(ctx context.Context, root string, p profile.Profile) (string, stri
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(p.TimeoutSec)*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(runCtx, p.Argv[0], p.Argv[1:]...)
+	bin := p.Argv[0]
+	if bin == "python" {
+		if _, err := exec.LookPath(bin); err != nil {
+			if p3, err3 := exec.LookPath("python3"); err3 == nil {
+				bin = p3
+			}
+		}
+	}
+	cmd := exec.CommandContext(runCtx, bin, p.Argv[1:]...)
 	cmd.Dir = p.HostDir(root)
 	cmd.Env = profile.HostEnv(p, root)
 	var stdout, stderr strings.Builder

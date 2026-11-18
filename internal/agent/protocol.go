@@ -104,6 +104,7 @@ type Transcript struct {
 // Stream assembles one protocol from arbitrary chunks. A partial line is not an event.
 type Stream struct {
 	kind     string
+	mode     string
 	buf      []byte
 	tr       Transcript
 	failed   error
@@ -113,15 +114,31 @@ type Stream struct {
 	text     strings.Builder
 }
 
-// NewStream starts a scripted parser for a pinned protocol.
+// NewStream starts a scripted parser for a pinned protocol in read-only ask mode.
 func NewStream(protocol string) (*Stream, error) {
+	return NewStreamWithMode(protocol, "ask")
+}
+
+// NewStreamWithMode starts a scripted parser for a pinned protocol with explicit
+// AGT policy mode ("ask" or "agent"). Empty defaults to "ask".
+func NewStreamWithMode(protocol, mode string) (*Stream, error) {
 	switch protocol {
 	case ProtocolCodex, ProtocolClaude:
 	default:
 		return nil, protocolf("unsupported protocol %q", protocol)
 	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "ask"
+	}
+	switch mode {
+	case "ask", "agent":
+	default:
+		return nil, protocolf("unsupported policy mode %q", mode)
+	}
 	return &Stream{
 		kind:     protocol,
+		mode:     mode,
 		finished: map[string]bool{},
 		pending:  map[string]struct{}{},
 		tr: Transcript{

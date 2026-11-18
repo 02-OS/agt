@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/csy20/agt/internal/tools"
 )
 
 // Capture is the provenance of a snapshot. Revision is empty when the
@@ -55,22 +57,7 @@ func Overlap(repo, dataDir string) error {
 // CanonicalRepo is the cleaned absolute directory with symlinks resolved.
 // The path must already exist and be a directory.
 func CanonicalRepo(path string) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("repo_path is required")
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(abs)
-	if err != nil || !info.IsDir() {
-		return "", fmt.Errorf("repo_path is not a directory")
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Clean(resolved), nil
+	return tools.CanonicalRepo(path)
 }
 
 func canonical(p string) (string, error) {
